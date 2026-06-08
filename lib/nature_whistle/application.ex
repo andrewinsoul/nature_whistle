@@ -7,39 +7,49 @@ defmodule NatureWhistle.Application do
 
   @impl true
   def start(_type, _args) do
+    cpu_cores = System.schedulers_online()
+
     create_ets_tables()
-    load_config_into_ets()
+    load_config_into_ets(cpu_cores)
     attach_handlers()
 
-    children = [
-      # Starts a worker by calling: NatureWhistle.Worker.start_link(arg)
-      # {NatureWhistle.Worker, arg}
-      NatureWhistle.Cooldown
-    ]
-
-    # See https://hexdocs.pm/elixir/Supervisor.html
-    # for other strategies and supported options
-    opts = [strategy: :one_for_one, name: NatureWhistle.Supervisor]
-    Supervisor.start_link(children, opts)
+    {:ok, self()}
   end
 
   defp create_ets_tables do
     if :ets.whereis(:nature_whistle_alerts) == :undefined do
-      :ets.new(:nature_whistle_alerts, [:named_table, :set, read_concurrency: true])
+      :ets.new(:nature_whistle_alerts, [
+        :named_table,
+        :set,
+        :public,
+        write_concurrency: true,
+        read_concurrency: true
+      ])
     end
 
     if :ets.whereis(:nature_whistle_notifiers) == :undefined do
-      :ets.new(:nature_whistle_notifiers, [:named_table, :set, read_concurrency: true])
+      :ets.new(:nature_whistle_notifiers, [
+        :named_table,
+        :set,
+        :public,
+        write_concurrency: true,
+        read_concurrency: true
+      ])
     end
 
     if :ets.whereis(:nature_whistle_cooldown) == :undefined do
-      :ets.new(:nature_whistle_cooldown, [:named_table, :set, public: true])
+      :ets.new(:nature_whistle_cooldown, [:named_table, :set, :public])
+    end
+
+    if :ets.whereis(:nature_whistle_alert_state) == :undefined do
+      :ets.new(:nature_whistle_alert_state, [:named_table, :set, :public])
     end
   end
 
-  defp load_config_into_ets do
+  defp load_config_into_ets(cpu_cores) do
     :ets.delete_all_objects(:nature_whistle_alerts)
     :ets.delete_all_objects(:nature_whistle_notifiers)
+    :ets.delete_all_objects(:nature_whistle_alert_state)
 
     alerts = Application.get_env(:nature_whistle, :alerts, :default)
     notifiers = Application.get_env(:nature_whistle, :notifiers, :default)
@@ -47,23 +57,41 @@ defmodule NatureWhistle.Application do
     alerts_list = if alerts == :default, do: default_alerts(), else: alerts
     notifiers_list = if notifiers == :default, do: default_notifiers(), else: notifiers
 
-    alerts_by_event =
-      Enum.reduce(alerts_list, %{}, fn alert, acc ->
-        event = Keyword.fetch!(alert, :event)
+    Enum.reduce(alerts_list, %{}, fn alert, acc ->
+      event = Keyword.fetch!(alert, :event)
+      raw_threshold = Keyword.fetch!(alert, :threshold)
 
-        alert_map = %{
-          id: Keyword.fetch!(alert, :id),
-          event: event,
-          threshold: Keyword.fetch!(alert, :threshold),
-          message: Keyword.fetch!(alert, :message),
-          cooldown_ms: Keyword.get(alert, :cooldown_ms, 60_000),
-          notifier: Keyword.get(alert, :notifier, :console)
-        }
+      threshold_value =
+        if event == [:vm, :total_run_queue_lengths, :total] do
+          raw_threshold * cpu_cores
+        else
+          raw_threshold
+        end
 
-        Map.update(acc, event, [alert_map], &[alert_map | &1])
-      end)
+      alert_map = %{
+        id: Keyword.fetch!(alert, :id),
+        event: Keyword.fetch!(alert, :event),
+        measurement_key: Keyword.get(alert, :measurement_key, :value),
+        threshold: threshold_value,
+        alert_message:
+          Keyword.get(
+            alert,
+            :alert_message,
+            "🚨 NatureWhistle alert: %{value} exceeded threshold (#{alert.threshold}) for event #{inspect(event)}"
+          ),
+        calm_message:
+          Keyword.get(
+            alert,
+            :calm_message,
+            "✅ NatureWhistle resolution: %{value} is back below threshold (#{alert.threshold}) for event #{inspect(event)}"
+          ),
+        cooldown_ms: Keyword.get(alert, :cooldown_ms, 60_000),
+        resolution_ms: Keyword.get(alert, :resolution_ms, 60_000),
+        notifier: Keyword.get(alert, :notifier, :console)
+      }
 
-    alerts_by_event
+      Map.update(acc, event, [alert_map], &[alert_map | &1])
+    end)
     |> Enum.each(fn {event, alert_list} ->
       :ets.insert(:nature_whistle_alerts, {event, alert_list})
     end)
@@ -81,7 +109,8 @@ defmodule NatureWhistle.Application do
         event: [:vm, :memory, :total],
         # 1 GB
         threshold: 1_073_741_824,
-        message: "⚠️ High memory usage: %{value} MB",
+        alert_message: "⚠️ High memory usage: %{value} MB",
+        calm_message: "✅ Memory usage back to normal: %{value} MB",
         # 5 minutes
         cooldown_ms: 300_000,
         notifier: :console
@@ -89,8 +118,9 @@ defmodule NatureWhistle.Application do
       [
         id: :high_cpu,
         event: [:vm, :total_run_queue_lengths, :total],
-        threshold: 5,
-        message: "🚨 High CPU load: run queue length is %{value}",
+        threshold: 4,
+        alert_message: "🚨 High CPU load: run queue length is %{value}",
+        calm_message: "✅ CPU Queue length back to normal: %{value}",
         # 1 minute
         cooldown_ms: 60_000,
         notifier: :console

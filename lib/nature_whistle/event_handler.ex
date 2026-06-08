@@ -2,9 +2,11 @@ defmodule NatureWhistle.EventHandler do
   @moduledoc """
   Telemetry event handler for NatureWhistle.
   """
+  require Logger
 
   @alerts_table :nature_whistle_alerts
   @cooldown_table :nature_whistle_cooldown
+  @state_table :nature_whistle_alert_state
 
   @doc """
   Callback invoked by :telemetry when a matching event occurs.
@@ -12,65 +14,121 @@ defmodule NatureWhistle.EventHandler do
   def handle_event(event, measurements, metadata, _config) do
     case :ets.lookup(@alerts_table, event) do
       [{^event, alerts}] ->
-        value = extract_value(measurements)
-        Enum.each(alerts, &check_alert(&1, value, metadata))
+        try do
+          Enum.each(alerts, &check_alert(&1, measurements, metadata))
+        rescue
+          e -> Logger.error("NatureWhistle alert handler crashed: #{inspect(e)}")
+        end
 
       [] ->
         :ok
     end
   end
 
-  defp extract_value(measurements) do
-    cond do
-      is_map(measurements) and map_size(measurements) > 0 ->
-        # Try common keys: :value, :total, or the first value in the map
-        measurements[:value] || measurements[:total] ||
-          measurements |> Map.values() |> List.first()
+  defp check_alert(alert, measurements, metadata) do
+    value = extract_value(measurements, alert.measurement_key)
 
-      true ->
-        measurements
-    end
-  end
+    if is_number(value) do
+      current_time = System.monotonic_time(:millisecond)
 
-  defp check_alert(alert, value, metadata) do
-    if value >= alert.threshold do
-      if cooldown_allowed?(alert) do
-        record_cooldown(alert)
-        send_alert(alert, value, metadata)
+      if value >= alert.threshold do
+        handle_high_value(alert, value, metadata, current_time)
+      else
+        handle_low_value(alert, value, metadata, current_time)
       end
     end
   end
 
-  defp cooldown_allowed?(alert) do
-    now = System.monotonic_time(:millisecond)
+  defp handle_high_value(alert, value, metadata, current_time) do
+    case get_alert_state(alert.id) do
+      nil ->
+        if cooldown_allowed?(alert, current_time) do
+          send_notification(alert, value, metadata, :alert)
+          record_cooldown(alert, current_time)
+          update_alert_state(alert.id, {:firing, current_time, nil})
+        end
 
+      {:calm, _, _} ->
+        if cooldown_allowed?(alert, current_time) do
+          send_notification(alert, value, metadata, :alert)
+          record_cooldown(alert, current_time)
+          update_alert_state(alert.id, {:firing, current_time, nil})
+        end
+
+      {:firing, last_alert_time, _} ->
+        if current_time - last_alert_time >= alert.cooldown_ms do
+          send_notification(alert, value, metadata, :alert)
+          record_cooldown(alert, current_time)
+          update_alert_state(alert.id, {:firing, current_time, nil})
+        end
+    end
+  end
+
+  defp handle_low_value(alert, value, metadata, current_time) do
+    case get_alert_state(alert.id) do
+      {:firing, last_alert_time, below_since} ->
+        new_below_since = below_since || current_time
+
+        if current_time - new_below_since >= alert.resolution_ms do
+          send_notification(alert, value, metadata, :calm)
+          update_alert_state(alert.id, {:calm, nil, nil})
+        else
+          update_alert_state(alert.id, {:firing, last_alert_time, new_below_since})
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp extract_value(measurements, measurement_key) do
+    if is_map(measurements) do
+      case measurements[measurement_key] do
+        value when is_number(value) -> value
+        _ -> nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp cooldown_allowed?(alert, current_time) do
     case :ets.lookup(@cooldown_table, alert.id) do
       [{_id, last_trigger}] ->
-        now - last_trigger >= alert.cooldown_ms
+        current_time - last_trigger >= alert.cooldown_ms
 
       [] ->
         true
     end
   end
 
-  defp record_cooldown(alert) do
-    now = System.monotonic_time(:millisecond)
-    :ets.insert(@cooldown_table, {alert.id, now})
+  defp record_cooldown(alert, current_time) do
+    :ets.insert(@cooldown_table, {alert.id, current_time})
   end
 
-  defp send_alert(alert, value, metadata) do
-    # Interpolate %{value} in the message
-    message = String.replace(alert.message, "%{value}", to_string(value))
+  defp get_alert_state(alert_id) do
+    case :ets.lookup(@state_table, alert_id) do
+      [{^alert_id, state}] -> state
+      [] -> nil
+    end
+  end
 
-    # Fetch notifier config
+  defp update_alert_state(alert_id, state) do
+    :ets.insert(@state_table, {alert_id, state})
+  end
+
+  defp send_notification(alert, value, metadata, type) do
+    message_template = if type == :alert, do: alert.alert_message, else: alert.calm_message
+    formatted_value = format_value(alert.event, value)
+    message = String.replace(message_template, "%{value}", formatted_value)
     notifier_name = alert.notifier
 
     case :ets.lookup(:nature_whistle_notifiers, notifier_name) do
-      [{^notifier_name, notifier_config}] ->
-        dispatch_to_notifier(notifier_name, message, metadata, notifier_config)
+      [{^notifier_name, config}] ->
+        dispatch_to_notifier(alert.notifier, message, metadata, config)
 
       [] ->
-        IO.warn("No configuration found for notifier #{inspect(notifier_name)}")
+        IO.warn("No configuration found for notifier #{inspect(alert.notifier)}")
     end
   end
 
@@ -86,7 +144,20 @@ defmodule NatureWhistle.EventHandler do
     NatureWhistle.Notifier.Webhook.deliver(message, metadata, config)
   end
 
+  defp dispatch_to_notifier(:console, message, metadata, _config) do
+    NatureWhistle.Notifier.Console.deliver(message, metadata, %{})
+  end
+
   defp dispatch_to_notifier(other, _message, _metadata, _config) do
     IO.warn("Unsupported notifier: #{inspect(other)}")
+  end
+
+  defp format_value([:vm, :memory, :total], value) do
+    mb = div(value, 1_048_576)
+    "#{mb} MB"
+  end
+
+  defp format_value(_event, value) do
+    to_string(value)
   end
 end
