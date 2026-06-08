@@ -76,7 +76,7 @@ config :nature_whistle,
 | `measurement_key` | ❌ (default `:value`)   | Key inside the `measurements` map that holds the numeric value (e.g. `:duration`, `:total`). |
 | `threshold`       | ✅                      | Numeric value that triggers the alert (when `value >= threshold`).                           |
 | `alert_message`   | ❌                      | Message sent when threshold is crossed. Use `%{value}` as placeholder.                       |
-| `calm_message`    | ❌                      | Message sent when metric stays below threshold for `resolution_ms`.                          |
+| `calm_message`    | ❌                      | Message sent when metric stays below threshold for `resolution_ms` after a spike.                          |
 | `cooldown_ms`     | ❌ (default 60 000)     | Minimum time between repeated alert messages while the metric remains high.                  |
 | `resolution_ms`   | ❌ (default 60 000)     | Time the metric must stay below threshold before sending the calm message.                   |
 | `notifier`        | ❌ (default `:console`) | One of `:slack`, `:teams`, `:webhook`, or `:console`.                                        |
