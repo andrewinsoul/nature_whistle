@@ -1,0 +1,49 @@
+language: elixir
+
+# List of Elixir versions to test against (matrix builds)
+elixir:
+  - 1.16.0
+  - 1.17.0
+  - 1.18.0
+
+# List of Erlang/OTP versions to test against
+otp_release:
+  - 26.0
+  - 27.0
+
+env:
+  global:
+    - MIX_ENV=test
+
+
+before_script:
+  - mix local.rebar --force
+  - mix local.hex --force
+
+script:
+  - mix deps.get
+  - mix compile --warnings-as-errors
+  - mix test
+
+cache:
+  directories:
+    - _build
+    - deps
+
+# After a successful build, report test coverage (optional)
+after_success:
+  - mix coveralls.travis
+
+# Notifications (example: email on build failure)
+notifications:
+  email:
+    recipients:
+      - andrewinsoul@gmail.com
+    on_success: never
+    on_failure: change
+
+# Limit builds on specific branches (optional)
+branches:
+  only:
+    - main
+    - /^v\d+\.\d+(\.\d+)?(-\S*)?$/ # tags like v1.2.3
