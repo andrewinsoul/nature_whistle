@@ -1,20 +1,14 @@
 language: elixir
 
-# List of Elixir versions to test against (matrix builds)
 elixir:
-  - 1.16.0
-  - 1.17.0
   - 1.18.0
 
-# List of Erlang/OTP versions to test against
 otp_release:
-  - 26.0
   - 27.0
 
 env:
   global:
     - MIX_ENV=test
-
 
 before_script:
   - mix local.rebar --force
