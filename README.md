@@ -1,7 +1,9 @@
 # NatureWhistle
-![NatureWhistle Banner](assets/img/nature_whistle.jpeg)
-# NatureWhistle
+<p align="center">
+  <img src="assets/img/nature_whistle.jpeg" alt="NatureWhistle Banner" width="100%">
+</p>
 
+*Let your system whisper its troubles before they become screams.*
 
 **NatureWhistle** is an Elixir library that listens to `:telemetry` events and sends alerts to collaboration tools (Slack, Microsoft Teams, generic webhooks, or the console) when metric thresholds are crossed. It also sends resolution (“calm”) notifications when a metric returns to normal.
 
