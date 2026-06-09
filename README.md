@@ -1,11 +1,12 @@
 # NatureWhistle
+
 <p align="center">
   <img src="assets/img/nature_whistle.jpeg" alt="NatureWhistle Banner" width="100%">
 </p>
 
-[![Elixir CI](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml/badge.svg?branch=main)](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml)
+[![Nature Whistle CI](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml/badge.svg?branch=main)](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml)
 
-*Let your system whisper its troubles before they become screams.*
+_Let your system whisper its troubles before they become screams._
 
 **NatureWhistle** is an Elixir library that listens to `:telemetry` events and sends alerts to collaboration tools (Slack, Microsoft Teams, generic webhooks, or the console) when metric thresholds are crossed. It also sends resolution (“calm”) notifications when a metric returns to normal.
 
@@ -78,7 +79,7 @@ config :nature_whistle,
 | `measurement_key` | ❌ (default `:value`)   | Key inside the `measurements` map that holds the numeric value (e.g. `:duration`, `:total`). |
 | `threshold`       | ✅                      | Numeric value that triggers the alert (when `value >= threshold`).                           |
 | `alert_message`   | ❌                      | Message sent when threshold is crossed. Use `%{value}` as placeholder.                       |
-| `calm_message`    | ❌                      | Message sent when metric stays below threshold for `resolution_ms` after a spike.                          |
+| `calm_message`    | ❌                      | Message sent when metric stays below threshold for `resolution_ms` after a spike.            |
 | `cooldown_ms`     | ❌ (default 60 000)     | Minimum time between repeated alert messages while the metric remains high.                  |
 | `resolution_ms`   | ❌ (default 60 000)     | Time the metric must stay below threshold before sending the calm message.                   |
 | `notifier`        | ❌ (default `:console`) | One of `:slack`, `:teams`, `:webhook`, or `:console`.                                        |
