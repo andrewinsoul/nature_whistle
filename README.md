@@ -195,6 +195,19 @@ Both `alert_message` and `calm_message` support the `%{value}` placeholder, whic
 
 > **Future enhancement** – A future version of `nature_whistle` will allow you to provide a custom formatting function per alert (e.g., converting microseconds to milliseconds, adding units). Currently, formatting is limited to built‑in VM memory conversion.
 
+## Integration with PromEx
+
+[PromEx](https://github.com/akoutmos/prom_ex) is a powerful Elixir library that collects and exposes application metrics to Prometheus (and then to Grafana for visualisation). However, PromEx itself **does not send alerts** – you would need to add Prometheus + Alertmanager to get Slack or Teams notifications.
+
+This is where `nature_whistle` becomes the perfect lightweight companion. Both libraries listen to the same `:telemetry` events, so you can run them side by side:
+
+- **PromEx** handles metric aggregation, storage, and dashboards (via Prometheus + Grafana) for long‑term visibility.
+- **nature_whistle** provides instant, no‑infrastructure alerts to Slack, Teams, or any webhook – directly from your Elixir application.
+
+You get the best of both worlds: rich visualisations for debugging trends and direct, low‑latency alerts for critical spikes. No separate Alertmanager setup, no PromQL to learn. Just add `nature_whistle` to your supervision tree, configure your thresholds, and you’re done.
+
+> **Pro tip:** You can even use `nature_whistle` to alert on the same custom telemetry events that PromEx exposes – giving you a complete monitoring story with almost zero operational overhead.
+
 ## Performance considerations
 
 NatureWhistle is designed for low to medium telemetry volume (dozens to hundreds of events per second). It processes each event synchronously in the caller process, and HTTP alerts are sent directly from that process.
