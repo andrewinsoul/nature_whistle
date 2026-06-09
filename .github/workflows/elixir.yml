@@ -2,19 +2,14 @@ name: Elixir CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [ main, master ]
   pull_request:
-    branches: [main, master]
+    branches: [ main, master ]
 
 jobs:
   build:
     name: Build and test
     runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        elixir: [1.16.0, 1.17.0, 1.18.0]
-        otp: [26.0, 27.0]
 
     steps:
       - name: Checkout code
@@ -23,8 +18,8 @@ jobs:
       - name: Set up Elixir
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: ${{ matrix.elixir }}
-          otp-version: ${{ matrix.otp }}
+          elixir-version: 1.18.0
+          otp-version: 27.0
 
       - name: Cache dependencies
         uses: actions/cache@v4
@@ -32,9 +27,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('mix.lock') }}
+          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-
+            ${{ runner.os }}-mix-
 
       - name: Install dependencies
         run: mix deps.get
