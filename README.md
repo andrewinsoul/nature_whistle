@@ -195,6 +195,12 @@ Both `alert_message` and `calm_message` support the `%{value}` placeholder, whic
 
 > **Future enhancement** – A future version of `nature_whistle` will allow you to provide a custom formatting function per alert (e.g., converting microseconds to milliseconds, adding units). Currently, formatting is limited to built‑in VM memory conversion.
 
+## Performance considerations
+
+NatureWhistle is designed for low to medium telemetry volume (dozens to hundreds of events per second). It processes each event synchronously in the caller process, and HTTP alerts are sent directly from that process.
+
+For very high‑volume systems (thousands of events per second), consider using a purpose-built observability stack like Prometheus + Alertmanager or a hosted monitoring service. **A future version of NatureWhistle will introduce asynchronous processing and batching to support higher throughput.** Stay tuned.
+
 ## Contributing & Feedback
 
 NatureWhistle is an open source project that thrives on community input. Whether you have a bug report, a feature request, a question, or want to contribute code, you are very welcome.
