@@ -128,7 +128,7 @@ defmodule NatureWhistle.EventHandler do
         dispatch_to_notifier(alert.notifier, message, metadata, config)
 
       [] ->
-        IO.warn("No configuration found for notifier #{inspect(alert.notifier)}")
+        dispatch_to_notifier(alert.notifier, message, metadata, nil)
     end
   end
 
@@ -149,7 +149,7 @@ defmodule NatureWhistle.EventHandler do
   end
 
   defp dispatch_to_notifier(other, _message, _metadata, _config) do
-    IO.warn("Unsupported notifier: #{inspect(other)}")
+    Logger.warning("Unsupported notifier: #{inspect(other)}")
   end
 
   defp format_value([:vm, :memory, :total], value) do
