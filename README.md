@@ -2,7 +2,8 @@
 <p align="center">
   <img src="assets/img/nature_whistle.jpeg" alt="NatureWhistle Banner" width="100%">
 </p>
-![Elixir CI]https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml/badge.svg?branch=main)
+
+[![Elixir CI](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml/badge.svg?branch=main)](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml)
 
 *Let your system whisper its troubles before they become screams.*
 
