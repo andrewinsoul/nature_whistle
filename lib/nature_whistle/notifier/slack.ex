@@ -1,7 +1,22 @@
 defmodule NatureWhistle.Notifier.Slack do
+  @moduledoc """
+  Sends alerts to a Slack channel via incoming webhook.
+
+  ## Configuration
+
+  In your `config/config.exs`:
+
+      config :nature_whistle, notifiers: [
+        slack: [webhook_url: "https://hooks.slack.com/services/..."]
+      ]
+
+  The only required option is `:webhook_url`.
+
+  This notifier automatically retries failed requests (3 attempts by default) with exponential backoff.
+  Retry settings can be adjusted under the `:retry` key in the `:nature_whistle` configuration.
+  """
   alias NatureWhistle.Notifier.Retry
   @behaviour NatureWhistle.Notifier.Behaviour
-
 
   @impl true
   def deliver(message, _metadata, config) do

@@ -1,4 +1,20 @@
 defmodule NatureWhistle.Notifier.Teams do
+  @moduledoc """
+  Sends alerts to a Microsoft Teams channel via incoming webhook.
+
+  ## Configuration
+
+  In your `config/config.exs`:
+
+      config :nature_whistle, notifiers: [
+        teams: [webhook_url: "https://outlook.office.com/webhook/..."]
+      ]
+
+  The only required option is `:webhook_url`.
+
+  This notifier automatically retries failed requests (3 attempts by default) with exponential backoff.
+  Retry settings can be adjusted under the `:retry` key in the `:nature_whistle` configuration.
+  """
   alias NatureWhistle.Notifier.Retry
   @behaviour NatureWhistle.Notifier.Behaviour
 
