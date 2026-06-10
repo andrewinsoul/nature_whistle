@@ -1,7 +1,35 @@
 defmodule NatureWhistle.Application do
-  # See https://hexdocs.pm/elixir/Application.html
-  # for more information on OTP Applications
-  @moduledoc false
+  @moduledoc """
+  The OTP application entry point for `nature_whistle`.
+
+  This module is responsible for:
+
+  - Creating ETS tables (`:nature_whistle_alerts`, `:nature_whistle_notifiers`, `:nature_whistle_alert_state`, `:nature_whistle_cooldown`)
+  - Loading alert and notifier configuration from the host application’s environment
+  - Attaching `:telemetry` handlers for every configured event
+
+  To start `nature_whistle` in your host application, add `NatureWhistle.Application` to your supervision tree:
+
+      # lib/my_app/application.ex
+      def start(_type, _args) do
+        children = [
+          MyApp.Repo,
+          MyAppWeb.Endpoint,
+          NatureWhistle.Application   # <-- add this line
+        ]
+        Supervisor.start_link(children, strategy: :one_for_one)
+      end
+
+  ## Configuration
+
+  All configuration is read from the `:nature_whistle` application environment.
+  See the main `NatureWhistle` module documentation or the README for detailed configuration examples.
+
+  ## Fault tolerance
+
+  If the `NatureWhistle.Application` process terminates, the host’s supervisor restarts it,
+  recreating all ETS tables and re‑attaching telemetry handlers. No persistent state is lost.
+  """
 
   use Application
 

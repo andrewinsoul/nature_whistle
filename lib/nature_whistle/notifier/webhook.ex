@@ -1,4 +1,34 @@
 defmodule NatureWhistle.Notifier.Webhook do
+  @moduledoc """
+  Generic HTTP webhook notifier. Sends alerts to any endpoint.
+
+  ## Configuration
+
+  In your `config/config.exs`:
+
+      config :nature_whistle, notifiers: [
+        webhook: [
+          url: "https://your.service/hook",
+          method: :post,                # default :post
+          headers: [{"x-api-key", "abc"}],
+          body_template: :simple        # or :full, or a custom function
+        ]
+      ]
+
+  ### Options
+
+  * `:url` – required, the HTTP endpoint.
+  * `:method` – optional, default `:post`. Can be `:put`, `:delete`, etc.
+  * `:headers` – optional, list of `{header, value}` tuples.
+  * `:body_template` – optional, controls the JSON payload:
+    - `:simple` – sends `%{text: message}` (default).
+    - `:full` – sends `%{text: message, metadata: metadata, timestamp: ...}`.
+    - a function of arity 2 – receives `(message, metadata)` and returns a map.
+
+  This notifier automatically retries failed requests (3 attempts by default) with exponential backoff.
+  Retry settings can be adjusted under the `:retry` key in the `:nature_whistle` configuration.
+  """
+
   @behaviour NatureWhistle.Notifier.Behaviour
 
   alias NatureWhistle.Notifier.Retry
