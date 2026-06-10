@@ -7,6 +7,9 @@ defmodule NatureWhistle.MixProject do
       version: "0.1.0",
       elixir: "~> 1.11",
       start_permanent: Mix.env() == :prod,
+      description:
+        "Telemetry-based alerting for Elixir apps – Slack, Teams, custom webhooks, and console with spike/resolution alerts",
+      package: package(),
       deps: deps()
     ]
   end
@@ -30,6 +33,19 @@ defmodule NatureWhistle.MixProject do
       {:bypass, "~> 2.1", only: :test},
       {:plug, "~> 1.0", only: :test},
       {:ex_doc, "~> 0.31", only: :dev, runtime: false}
+    ]
+  end
+
+  defp package do
+    [
+      name: :nature_whistle,
+      description:
+        "Telemetry-based alerting for Elixir apps – Slack, Teams, custom webhooks, and console with spike/resolution alerts",
+      licenses: ["MIT"],
+      links: %{
+        "GitHub" => "https://github.com/andrewinsoul/nature_whistle"
+      },
+      files: ["lib", "mix.exs", "README.md", "LICENSE", "assets/img/*"]
     ]
   end
 end
