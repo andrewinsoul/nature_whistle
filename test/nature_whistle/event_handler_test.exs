@@ -1,3 +1,26 @@
+defmodule CustomTestNotifier do
+  @behaviour NatureWhistle.Notifier.Behaviour
+
+  use Agent
+
+  def start_link(_) do
+    Agent.start_link(fn -> [] end, name: __MODULE__)
+  end
+
+  def deliver(message, metadata, config) do
+    Agent.update(__MODULE__, &[%{message: message, metadata: metadata, config: config} | &1])
+    {:ok, :delivered}
+  end
+
+  def get_deliveries do
+    Agent.get(__MODULE__, &Enum.reverse/1)
+  end
+
+  def clear do
+    Agent.update(__MODULE__, fn _ -> [] end)
+  end
+end
+
 defmodule NatureWhistle.EventHandlerTest do
   use ExUnit.Case, async: false
   import ExUnit.CaptureLog
@@ -5,7 +28,8 @@ defmodule NatureWhistle.EventHandlerTest do
   setup do
     :ets.delete_all_objects(:nature_whistle_alert_state)
     :ets.delete_all_objects(:nature_whistle_cooldown)
-    # Ensure test notifier is console (default)
+
+    # Default alerts for most tests (console notifier)
     Application.put_env(:nature_whistle, :alerts, [
       %{
         id: :test_alert,
@@ -22,7 +46,6 @@ defmodule NatureWhistle.EventHandlerTest do
         id: :memory_test,
         event: [:vm, :memory, :total],
         measurement_key: :total,
-        # low threshold to always trigger
         threshold: 1_000_000,
         alert_message: "MEMORY: %{value} MB",
         calm_message: "MEMORY CALM",
@@ -45,6 +68,11 @@ defmodule NatureWhistle.EventHandlerTest do
       &NatureWhistle.EventHandler.handle_event/4,
       nil
     )
+
+    on_exit(fn ->
+      :telemetry.detach("test-metric-handler")
+      :telemetry.detach("test-memory-handler")
+    end)
 
     :ok
   end
@@ -93,17 +121,10 @@ defmodule NatureWhistle.EventHandlerTest do
   test "sends calm message after resolution period" do
     log =
       capture_log(fn ->
-        # Spike
         :telemetry.execute([:test, :metric], %{value: 15}, %{})
         Process.sleep(10)
-
-        # Drop below threshold
         :telemetry.execute([:test, :metric], %{value: 5}, %{})
-
         Process.sleep(60)
-
-        # Trigger again to force state check? Actually the handler checks on each event.
-        # After resolution_ms, a low value triggers calm.
         :telemetry.execute([:test, :metric], %{value: 5}, %{})
         Process.sleep(10)
       end)
@@ -113,7 +134,6 @@ defmodule NatureWhistle.EventHandlerTest do
   end
 
   test "warns when notifier config is missing" do
-    # Override alerts to use a notifier that has no config
     Application.put_env(:nature_whistle, :alerts, [
       %{
         id: :missing_config,
@@ -125,7 +145,7 @@ defmodule NatureWhistle.EventHandlerTest do
     ])
 
     NatureWhistle.Application.load_config_into_ets(System.schedulers_online())
-    # Ensure handler attached
+
     :telemetry.attach(
       "missing-config-test",
       [:test, :metric],
@@ -139,9 +159,12 @@ defmodule NatureWhistle.EventHandlerTest do
         Process.sleep(10)
       end)
 
-    assert log =~ ~r/Unsupported notifier: :missing/
+    assert log =~ "Custom notifier module :missing is not loaded or does not implement deliver/3"
 
     :telemetry.detach("missing-config-test")
+
+    Application.put_env(:nature_whistle, :alerts, [])
+    NatureWhistle.Application.load_config_into_ets(System.schedulers_online())
   end
 
   test "warns when notifier is unsupported" do
@@ -151,7 +174,7 @@ defmodule NatureWhistle.EventHandlerTest do
         event: [:test, :metric],
         threshold: 0,
         alert_message: "test",
-        notifier: :unknown
+        notifier: "unknown"
       }
     ])
 
@@ -170,9 +193,81 @@ defmodule NatureWhistle.EventHandlerTest do
         Process.sleep(10)
       end)
 
-    assert log =~ "Unsupported notifier: :unknown"
+    assert log =~ ~r/Unsupported notifier: [:\"]?unknown[:\"]?/
 
     :telemetry.detach("unsupported-test")
+    Application.put_env(:nature_whistle, :alerts, [])
+    NatureWhistle.Application.load_config_into_ets(System.schedulers_online())
+  end
+
+  describe "custom notifier module" do
+    setup do
+      {:ok, _} = CustomTestNotifier.start_link(nil)
+      CustomTestNotifier.clear()
+
+      Application.put_env(:nature_whistle, :alerts, [
+        %{
+          id: :custom_test,
+          event: [:test, :custom],
+          measurement_key: :value,
+          threshold: 10,
+          alert_message: "CUSTOM ALERT: %{value}",
+          calm_message: "CUSTOM CALM: %{value}",
+          cooldown_ms: 100,
+          resolution_ms: 50,
+          notifier: CustomTestNotifier,
+          notifier_config: [test_key: "test_value"]
+        }
+      ])
+
+      NatureWhistle.Application.load_config_into_ets(System.schedulers_online())
+
+      :telemetry.attach(
+        "custom-notifier-test",
+        [:test, :custom],
+        &NatureWhistle.EventHandler.handle_event/4,
+        nil
+      )
+
+      on_exit(fn ->
+        :telemetry.detach("custom-notifier-test")
+
+        Application.put_env(:nature_whistle, :alerts, [])
+        NatureWhistle.Application.load_config_into_ets(System.schedulers_online())
+      end)
+
+      :ok
+    end
+
+    test "sends alert to custom module notifier" do
+      :telemetry.execute([:test, :custom], %{value: 15}, %{})
+      Process.sleep(50)
+
+      deliveries = CustomTestNotifier.get_deliveries()
+      assert length(deliveries) == 1
+      [delivery] = deliveries
+      assert delivery.message =~ "CUSTOM ALERT: 15"
+      assert delivery.metadata == %{}
+      assert delivery.config == [test_key: "test_value"]
+    end
+
+    test "sends calm message after resolution period" do
+      :telemetry.execute([:test, :custom], %{value: 15}, %{})
+      Process.sleep(10)
+
+      :telemetry.execute([:test, :custom], %{value: 5}, %{})
+
+      Process.sleep(60)
+
+      :telemetry.execute([:test, :custom], %{value: 5}, %{})
+      Process.sleep(50)
+
+      deliveries = CustomTestNotifier.get_deliveries()
+      assert length(deliveries) == 2
+      [alert, calm] = deliveries
+      assert alert.message =~ "CUSTOM ALERT: 15"
+      assert calm.message =~ "CUSTOM CALM: 5"
+    end
   end
 
   defp count_occurrences(string, substring) do
