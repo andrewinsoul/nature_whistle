@@ -123,12 +123,29 @@ defmodule NatureWhistle.EventHandler do
     message = String.replace(message_template, "%{value}", formatted_value)
     notifier_name = alert.notifier
 
-    case :ets.lookup(:nature_whistle_notifiers, notifier_name) do
-      [{^notifier_name, config}] ->
-        dispatch_to_notifier(alert.notifier, message, metadata, config)
+    case alert.notifier do
+      ^notifier_name
+      when is_atom(notifier_name) and notifier_name in [:slack, :teams, :webhook, :console] ->
+        case :ets.lookup(:nature_whistle_notifiers, notifier_name) do
+          [{^notifier_name, config}] ->
+            dispatch_to_notifier(alert.notifier, message, metadata, config)
 
-      [] ->
-        dispatch_to_notifier(alert.notifier, message, metadata, nil)
+          [] ->
+            dispatch_to_notifier(alert.notifier, message, metadata, nil)
+        end
+
+      ^notifier_name when is_atom(notifier_name) ->
+        if Code.ensure_loaded?(notifier_name) and function_exported?(notifier_name, :deliver, 3) do
+          config = Map.get(alert, :notifier_config, [])
+          notifier_name.deliver(message, metadata, config)
+        else
+          Logger.warning(
+            "Custom notifier module #{inspect(notifier_name)} is not loaded or does not implement deliver/3"
+          )
+        end
+
+      other ->
+        Logger.warning("Unsupported notifier: #{inspect(other)}")
     end
   end
 

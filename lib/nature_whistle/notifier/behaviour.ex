@@ -2,20 +2,36 @@ defmodule NatureWhistle.Notifier.Behaviour do
   @moduledoc """
   Behaviour for implementing custom notifiers.
 
-  A notifier is responsible for delivering an alert message to an external service
-  (e.g., Slack, Teams, a custom webhook, or the console).
+  A notifier is responsible for delivering an alert message to an external service.
 
-  > #### Current limitation {: .warning}
-  > This behaviour is defined, but `nature_whistle` does **not** yet support using custom module notifiers directly.
-  > Only the built‑in notifiers (`:slack`, `:teams`, `:webhook`, `:console`) are supported via atom keys.
-  > Support for module names is planned for a future release.
+  ## Implementing a custom notifier
 
-  ## Built‑in notifiers
+  To create your own notifier, define a module that adopts this behaviour and implements `deliver/3`.
 
-  - `NatureWhistle.Notifier.Slack`
-  - `NatureWhistle.Notifier.Teams`
-  - `NatureWhistle.Notifier.Webhook`
-  - `NatureWhistle.Notifier.Console`
+  ### Example
+
+      defmodule MyApp.Notifiers.Discord do
+        @behaviour NatureWhistle.Notifier.Behaviour
+
+        @impl true
+        def deliver(message, _metadata, config) do
+          url = Keyword.fetch!(config, :webhook_url)
+          # send HTTP request...
+          {:ok, :sent}
+        end
+      end
+
+  Then use the module name as the `:notifier` in your alert configuration:
+
+      %{
+        id: :some_alert,
+        notifier: MyApp.Notifiers.Discord,
+        notifier_config: [webhook_url: "https://discord.com/..."]
+      }
+
+  > #### Supported {: .info}
+  > Starting from v0.2.0, any module that implements this behaviour can be used as a notifier.
+  > The optional `:notifier_config` field is passed as the third argument to `deliver/3`.
   """
 
   @doc """

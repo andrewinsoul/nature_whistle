@@ -5,6 +5,9 @@
 </p>
 
 [![Nature Whistle CI](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml/badge.svg?branch=main)](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml)
+[![Hex.pm version](https://img.shields.io/hexpm/v/nature_whistle)](https://hex.pm/packages/nature_whistle)
+[![Hex.pm downloads](https://img.shields.io/hexpm/dt/nature_whistle)](https://hex.pm/packages/nature_whistle)
+[![Hex.pm License](https://img.shields.io/hexpm/l/nature_whistle)](https://github.com/andrewinsoul/nature_whistle/blob/main/LICENSE)
 
 _Let your system whisper its troubles before they become screams._
 
@@ -19,7 +22,7 @@ _Let your system whisper its troubles before they become screams._
 - ⚙️ **Configurable thresholds** – set per‑alert thresholds, cooldowns, and resolution stabilisation periods.
 - 🔌 **Multiple notifiers** – Slack, Microsoft Teams, generic webhook, console (for development).
 - 🔁 **Automatic retries** – exponential backoff with configurable attempts and delay caps for HTTP notifiers.
-- 🧩 **Extensible** – add your own notifiers or customise request bodies.
+- 🧩 **Extensible** – implement your own notifier as a module using the `NatureWhistle.Notifier.Behaviour` or customise request bodies.
 - 💼 **Ready for production** – fault‑tolerant via host supervision, ETS storage, and safe telemetry handling.
 
 ## Installation
@@ -72,17 +75,18 @@ config :nature_whistle,
 
 ### Alert fields
 
-| Field             | Required                | Description                                                                                  |
-| ----------------- | ----------------------- | -------------------------------------------------------------------------------------------- |
-| `id`              | ✅                      | Unique identifier for this alert (used for state & cooldown).                                |
-| `event`           | ✅                      | Telemetry event name as a list of atoms, e.g. `[:vm, :memory, :total]`.                      |
-| `measurement_key` | ❌ (default `:value`)   | Key inside the `measurements` map that holds the numeric value (e.g. `:duration`, `:total`). |
-| `threshold`       | ✅                      | Numeric value that triggers the alert (when `value >= threshold`).                           |
-| `alert_message`   | ❌                      | Message sent when threshold is crossed. Use `%{value}` as placeholder.                       |
-| `calm_message`    | ❌                      | Message sent when metric stays below threshold for `resolution_ms` after a spike.            |
-| `cooldown_ms`     | ❌ (default 60 000)     | Minimum time between repeated alert messages while the metric remains high.                  |
-| `resolution_ms`   | ❌ (default 60 000)     | Time the metric must stay below threshold before sending the calm message.                   |
-| `notifier`        | ❌ (default `:console`) | One of `:slack`, `:teams`, `:webhook`, or `:console`.                                        |
+| Field             | Required                | Description                                                                                            |
+| ----------------- | ----------------------- | ------------------------------------------------------------------------------------------------------ |
+| `id`              | ✅                      | Unique identifier for this alert (used for state & cooldown).                                          |
+| `event`           | ✅                      | Telemetry event name as a list of atoms, e.g. `[:vm, :memory, :total]`.                                |
+| `measurement_key` | ❌ (default `:value`)   | Key inside the `measurements` map that holds the numeric value (e.g. `:duration`, `:total`).           |
+| `threshold`       | ✅                      | Numeric value that triggers the alert (when `value >= threshold`).                                     |
+| `alert_message`   | ❌                      | Message sent when threshold is crossed. Use `%{value}` as placeholder.                                 |
+| `calm_message`    | ❌                      | Message sent when metric stays below threshold for `resolution_ms` after a spike.                      |
+| `cooldown_ms`     | ❌ (default 60 000)     | Minimum time between repeated alert messages while the metric remains high.                            |
+| `resolution_ms`   | ❌ (default 60 000)     | Time the metric must stay below threshold before sending the calm message.                             |
+| `notifier`        | ❌ (default `:console`) | One of `:slack`, `:teams`, `:webhook`, or `:console`.                                                  |
+| `notifier_config` | ❌                      | Keyword list passed as the third argument to a custom notifier module. Ignored for built‑in notifiers. |
 
 ### Notifier configuration
 
@@ -93,6 +97,7 @@ Notifiers are configured under the `:notifiers` key. Each notifier expects a key
   `teams: [webhook_url: "https://outlook.office.com/webhook/..."]`
 
 - **Webhook (generic)**
+
   ```elixir
   webhook: [
     url: "https://my.service/hook",
@@ -101,6 +106,46 @@ Notifiers are configured under the `:notifiers` key. Each notifier expects a key
     body_template: :simple        # or :full, or a custom function
   ]
   ```
+
+> 💡 For advanced integrations, you can write your own notifier module (see [Custom notifier modules](#custom-notifier-modules)).
+
+### Custom notifier modules
+
+If you need to send alerts to a service not built into `nature_whistle` (e.g., Discord, Opsgenie, a custom internal API), you can write your own notifier module that implements the `NatureWhistle.Notifier.Behaviour`.
+
+#### Example: Discord notifier
+
+```elixir
+defmodule MyApp.DiscordNotifier do
+  @behaviour NatureWhistle.Notifier.Behaviour
+
+  def deliver(message, _metadata, config) do
+    url = Keyword.fetch!(config, :webhook_url)
+    payload = %{content: message}
+    case Req.post(url, json: payload) do
+      {:ok, %Req.Response{status: 200}} -> {:ok, :sent}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+end
+```
+
+Then reference your module in the alert configuration:
+
+```elixir
+config :nature_whistle, alerts: [
+  %{
+    id: :my_alert,
+    event: [:my, :event],
+    threshold: 100,
+    alert_message: "Alert! %{value}",
+    notifier: MyApp.DiscordNotifier,
+    notifier_config: [webhook_url: "https://discord.com/api/webhooks/..."]
+  }
+]
+```
+
+> The :notifier_config field is optional and can contain any keyword list – it will be passed as the third argument to your module’s deliver/3 function. Built‑in notifiers ignore this field.
 
 ### Retry settings
 
