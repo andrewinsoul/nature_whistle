@@ -32,7 +32,7 @@ Add `nature_whistle` to your `mix.exs` dependencies:
 ```elixir
 defp deps do
   [
-    {:nature_whistle, "~> 0.1.0"}
+    {:nature_whistle, "~> 0.2.0"}
   ]
 end
 ```
