@@ -1,6 +1,19 @@
 defmodule NatureWhistle.EventHandler do
   @moduledoc """
   Telemetry event handler for NatureWhistle.
+
+  This module is the hot path of the library. It is called directly by
+  `:telemetry` whenever a configured event is emitted, so the code here is kept
+  intentionally small and defensive:
+
+  - locate the alerts configured for the event
+  - read the measurement specified by `measurement_key`
+  - compare the measurement to the alert threshold
+  - apply rate-limit and sliding-window suppression
+  - transition the alert into a breached state if delivery is allowed
+
+  Any exception is rescued and logged so alert processing never crashes the
+  host application.
   """
   alias NatureWhistle.BackgroundCleaner
 
@@ -10,7 +23,18 @@ defmodule NatureWhistle.EventHandler do
   @alerts_table :nature_whistle_alerts
 
   @doc """
-  Callback invoked by :telemetry when a matching event occurs.
+  Handles a single telemetry event.
+
+  Parameters:
+
+  - `event` - the telemetry event name, for example `[:vm, :memory, :total]`
+  - `measurements` - the telemetry measurement map
+  - `metadata` - arbitrary metadata emitted with the event
+  - `_config` - telemetry callback config, currently unused
+
+  The function is designed to be called by `:telemetry.attach/4`. It performs
+  all alert evaluation for that event and quietly returns `:ok` when no alert is
+  configured or no threshold is crossed.
   """
   def handle_event(event, measurements, metadata, _config) do
     case :ets.lookup(@alerts_table, event) do

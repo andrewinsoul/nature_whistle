@@ -1,61 +1,41 @@
 defmodule NatureWhistle do
   @moduledoc """
-  `nature_whistle` is a telemetry‑driven alerting library for Elixir applications.
+  `NatureWhistle` is the public entry point for the library.
 
-  It listens to `:telemetry` events, checks values against configured thresholds,
-  and sends alerts to Slack, Microsoft Teams, generic webhooks, or the console.
-  When a metric returns to normal, it sends a **calm** notification.
+  It holds the default alert templates shipped with the project and provides
+  helpers for looking up alert definitions from application configuration.
 
-  ## Features
+  The runtime itself is started through `NatureWhistle.Application`, but this
+  module is still useful because it documents the shape of the alert structures
+  that flow through the rest of the system:
 
-  - **Telemetry‑driven** – works with any `:telemetry` event (VM, Phoenix, Ecto, Oban, custom).
-  - **Alert + Calm** – get notified both when a problem starts **and** when it resolves.
-  - **Configurable thresholds, cooldown, resolution periods**.
-  - **Multiple notifiers** – Slack, Teams, custom webhook, console.
-  - **Automatic retries** for HTTP notifiers (exponential backoff).
-  - **Low footprint** – uses only ETS tables and telemetry handlers, no extra processes.
+  - alert definitions are configured as maps or keyword lists
+  - alerts are grouped by telemetry event
+  - values are compared against a numeric `threshold`
+  - optional `formatter`, `rate_limit`, `sliding_window`, and `resolution_ms`
+    settings change how an alert behaves at runtime
+  - delivery targets are selected by profile names listed in `notifiers`
 
-  ## Usage
-
-  `nature_whistle` is configured via your application’s `config/config.exs`.
-  Add `NatureWhistle.Application` to your supervision tree.
-
-  See the [README](https://github.com/andrewinsoul/nature_whistle) for detailed configuration examples.
-
-  ## Example configuration
-
-      # config/config.exs
-      config :nature_whistle,
-        alerts: [
-          %{
-            id: :high_memory,
-            event: [:vm, :memory, :total],
-            measurement_key: :total,
-            threshold: 1_073_741_824,
-            alert_message: "🚨 High memory: %{value} MB",
-            calm_message: "✅ Memory back to normal: %{value} MB",
-            notifier: :slack
-          }
-        ],
-        notifiers: [
-          slack: [webhook_url: "https://hooks.slack.com/..."]
-        ]
-
-  ## Supervision
-
-  Add `NatureWhistle.Application` as a child of your main supervisor.
-
-      children = [
-        MyApp.Repo,
-        MyAppWeb.Endpoint,
-        NatureWhistle.Application
-      ]
-
-  ## Custom notifiers
-
-  You can implement your own notifier by implementing the `NatureWhistle.Notifier.Behaviour` callback.
+  The module also returns the built-in sample alerts used when no custom alerts
+  are configured. These are convenient examples for documentation and testing,
+  and the application loader understands both the older `:notifier` key and the
+  newer `:notifiers` profile list when normalizing them.
   """
 
+  @doc """
+  Returns the built-in sample alert templates shipped with NatureWhistle.
+
+  The returned values are keyword lists rather than maps so they are easy to
+  read in documentation and config examples. They demonstrate the two common
+  alert patterns supported by the library:
+
+  - a memory alert with a high threshold and a console delivery target
+  - a CPU run-queue alert with rate limiting and a sliding window gate
+
+  These values are used as a fallback template source when no custom alerts are
+  present in the application environment. Their `:notifier` field is accepted
+  for compatibility by `NatureWhistle.Application`.
+  """
   def default_alerts do
     [
       [
@@ -86,7 +66,21 @@ defmodule NatureWhistle do
   end
 
   @doc """
-  Retrieves a full alert configuration map from the application environment by its ID.
+  Looks up a single alert definition by `alert_id`.
+
+  The lookup is performed against `:nature_whistle, :alerts` in application
+  configuration. If that key is not set, the function falls back to
+  [`default_alerts/0`](#default_alerts/0) and converts the sample definitions
+  into maps before searching.
+
+  Both keyword lists and maps are accepted in the configuration source. The
+  helper normalizes each alert into a map so callers can rely on dot access
+  in the rest of the codebase.
+
+  ## Return value
+
+  - returns the matching alert map when found
+  - returns `nil` when no alert with the requested ID exists
   """
   def get_alert_config(alert_id) do
     alerts = Application.get_env(:nature_whistle, :alerts, default_alerts())

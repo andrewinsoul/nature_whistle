@@ -1,7 +1,20 @@
 defmodule NatureWhistle.BackgroundCleaner do
   @moduledoc """
-  A background worker that periodically sweeps the `:nature_whistle_rate_limit`
-  table to prune expired sliding window time-buckets and prevent memory leaks.
+  GenServer responsible for alert resolution and periodic cleanup.
+
+  The background cleaner has two jobs:
+
+  - manage resolution timers for breached alerts
+  - periodically sweep stale sliding-window and rate-limit buckets from ETS
+
+  Resolution timers are stored in the GenServer state rather than ETS because
+  they are process-local scheduling details. The alert lifecycle itself is still
+  tracked in `:nature_whistle_alert_state`, which allows the rest of the system
+  to see whether an alert is currently breached.
+
+  Sweeping is controlled by `:background_sweep_interval_ms` in application
+  configuration and uses `:max_window_history_ms` to decide how far back old
+  telemetry history should be retained.
   """
 
   use GenServer
@@ -13,15 +26,38 @@ defmodule NatureWhistle.BackgroundCleaner do
   @default_sweep_interval_ms :timer.minutes(5)
   @default_max_window_history_ms :timer.hours(1)
 
+  @doc """
+  Starts the background cleaner process.
+
+  Supported options:
+
+  - `:name` - optional process name, defaults to `NatureWhistle.BackgroundCleaner`
+  - `:sweep_interval_ms` - how often to prune ETS state
+
+  The process is normally started by `NatureWhistle.Application`.
+  """
   def start_link(opts) do
     {name, server_opts} = Keyword.pop(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, server_opts, name: name)
   end
 
+  @doc """
+  Schedules a resolution timer for a newly breached alert.
+
+  This message records the alert's current value and telemetry metadata so the
+  calmer notification can describe the breach that just ended.
+  """
   def start_debounce(alert_id, resolution_ms, value, metadata) do
     GenServer.cast(__MODULE__, {:start_debounce, alert_id, resolution_ms, value, metadata})
   end
 
+  @doc """
+  Replaces the current resolution timer for an alert that is still active.
+
+  If the alert breaches again before the resolution timer expires, the timer is
+  cancelled and restarted so the calm notification only appears after the metric
+  has stayed healthy for a full `resolution_ms` interval.
+  """
   def extend_debounce(alert_id, resolution_ms, value, metadata) do
     GenServer.cast(__MODULE__, {:extend_debounce, alert_id, resolution_ms, value, metadata})
   end
@@ -93,6 +129,16 @@ defmodule NatureWhistle.BackgroundCleaner do
     {:noreply, state}
   end
 
+  @doc """
+  Removes old rate-limit and sliding-window entries from ETS.
+
+  `max_window_history_ms` defines the oldest timestamp bucket that should be
+  kept. Buckets older than that are deleted, and rate-limit timestamp lists are
+  compacted so only recent values remain.
+
+  This function is public so it can be exercised directly in tests or invoked
+  manually when diagnosing state retention.
+  """
   def prune_expired_buckets(max_window_history_ms) do
     now = System.monotonic_time(:millisecond)
     cutoff_time = now - max_window_history_ms

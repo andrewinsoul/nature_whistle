@@ -1,4 +1,21 @@
 defmodule NatureWhistle.Notification do
+  @moduledoc """
+  Message formatting and asynchronous delivery orchestration.
+
+  `NatureWhistle.EventHandler` decides *when* a notification should happen.
+  This module decides *how* the notification is formatted and *which delivery
+  profiles* should receive it.
+
+  The dispatch path works in three stages:
+
+  1. choose the alert message or calm message template
+  2. format the current value for human-friendly display
+  3. queue delivery tasks for the matching notifier profiles
+
+  The actual HTTP or console delivery logic lives in the notifier modules under
+  `NatureWhistle.Notifier.*`.
+  """
+
   require Logger
 
   defp format_value(%{formatter: formatter}, value) when is_function(formatter, 1) do
@@ -83,6 +100,28 @@ defmodule NatureWhistle.Notification do
     ]
   end
 
+  @doc """
+  Formats and dispatches a notification for the given alert.
+
+  Parameters:
+
+  - `alert` - the normalized alert map loaded from ETS
+  - `value` - the current measurement value that triggered the notification
+  - `metadata` - telemetry metadata forwarded to the notifier implementation
+  - `type` - either `:alert` or `:calm`
+
+  The function:
+
+  - selects `alert_message` for `:alert` or `calm_message` for `:calm`
+  - formats the value using the alert's `formatter`, if one exists
+  - replaces `%{value}` in the message template
+  - loads `:notifiers_config` from application env, falling back to console
+  - matches alert profile names from `alert.notifiers` against the global
+    notifier profiles by `name`
+  - spawns an asynchronous task for each matching built-in notifier service
+
+  If no notifier profile matches, nothing is dispatched and a warning is logged.
+  """
   def send_notification(alert, value, metadata, type) do
     message_template = if type == :alert, do: alert.alert_message, else: alert.calm_message
     formatted_value = format_value(alert, value)

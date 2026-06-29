@@ -1,32 +1,23 @@
 defmodule NatureWhistle.Notifier.Webhook do
   @moduledoc """
-  Generic HTTP webhook notifier. Sends alerts to any endpoint.
+  Generic HTTP webhook delivery backend.
 
-  ## Configuration
+  This notifier sends the formatted message to any HTTP endpoint using `Req`.
+  It is the most flexible of the built-in delivery modules because it allows
+  the HTTP method, headers, and JSON payload shape to be customized.
 
-  In your `config/config.exs`:
+  Required config:
 
-      config :nature_whistle, notifiers: [
-        %{
-          name: :webhook,
-          config: %{
-            webhook_url: "https://your.service/hook"
-            method: :post, # default :post
-            headers: [{"x-api-key", "abc"}, {"Origin", "origin"}],
-            payload: %{text: "alert message"}
-          }
-        }
-      ]
+  - `:webhook_url` - the destination URL
 
-  ### Options
+  Optional config:
 
-  * `:webhook_url` – required, the HTTP endpoint.
-  * `:method` – optional, default `:post`. Can be `:put`, `:delete`, etc.
-  * `:headers` – optional, list of `{header, value}` tuples.
-  * `:payload` – optional, controls the JSON payload:, defaults to %{text: "alert or calm message"}
+  - `:method` - HTTP verb, defaults to `:post`
+  - `:headers` - a list of request headers
+  - `:payload` - a base JSON map merged with `%{text: message}`
 
-  This notifier automatically retries failed requests (3 attempts by default) with exponential backoff.
-  Retry settings can be adjusted under the `:retry` key in the `:nature_whistle` configuration.
+  Retry behavior is shared with Slack and Teams through
+  `NatureWhistle.Notifier.Retry`.
   """
 
   alias NatureWhistle.Notifier.Retry
@@ -34,6 +25,12 @@ defmodule NatureWhistle.Notifier.Webhook do
   @behaviour NatureWhistle.Notifier.Behaviour
 
   @impl true
+  @doc """
+  Delivers a message to an arbitrary webhook endpoint.
+
+  The notifier accepts either a keyword list or a map. The final JSON payload is
+  built by merging the configured `:payload` map with `%{text: message}`.
+  """
   def deliver(message, _metadata, config) do
     config =
       cond do

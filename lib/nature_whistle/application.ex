@@ -1,57 +1,22 @@
 defmodule NatureWhistle.Application do
   @moduledoc """
-  The OTP application entry point for `nature_whistle`.
+  OTP bootstrap for NatureWhistle.
 
-  This module is responsible for setting up the core in-memory table structures,
-  loading alert rules, attaching telemetry event handlers, and managing the package's
-  internal supervision tree for asynchronous and resilient operations.
+  This application module owns the runtime setup for the library:
 
-  Specifically, it handles:
-  - **ETS Table Initialization:** Creates named, public storage tables (`:nature_whistle_alerts`,
-    `:nature_whistle_alert_state`, `:nature_whistle_debounce`,
-    and `:nature_whistle_rate_limit`). Note that `:nature_whistle_rate_limit` is built
-    as an `:ordered_set` to support high-performance atomic updates for sliding window time-buckets.
-  - **Configuration Parsing:** Automatically ingests alert and notifier profiles from the host
-    application's environment variables.
-  - **Telemetry Hooking:** Dynamically attaches `:telemetry` execution handlers for every
-    configured system event during runtime boot.
-  - **Resilient Process Supervision:** Spins up a supervised architecture consisting of a
-    `Task.Supervisor` (to offload notifier webhooks asynchronously away from the emitting application threads)
-    and a `NatureWhistle.BackgroundCleaner` process (to periodically clear out expired sliding window metrics).
+  - it creates the ETS tables used to store alert definitions, alert state,
+    and rate-limiting data
+  - it loads alert configuration from the `:nature_whistle` application
+    environment into ETS
+  - it attaches a telemetry handler for each unique configured event
+  - it starts the `NatureWhistle.TaskSupervisor` used for asynchronous
+    notification delivery
+  - it starts `NatureWhistle.BackgroundCleaner`, which resolves alert timers
+    and prunes old rate-limit data
 
-  ## Supervision Setup
-
-  To start `nature_whistle` in your host application, append `NatureWhistle.Application`
-  to your main supervisor tree block:
-
-      # lib/my_app/application.ex
-      def start(_type, _args) do
-        children = [
-          MyApp.Repo,
-          MyAppWeb.Endpoint,
-          NatureWhistle.Application   # <-- add this line
-        ]
-
-        Supervisor.start_link(children, strategy: :one_for_one)
-      end
-
-  ## Configuration
-
-  All global settings are read from the `:nature_whistle` application environment.
-  You can customize the sweeping behavior of the background cleaner by modifying the setting below:
-
-      config :nature_whistle,
-        background_sweep_interval_ms: :timer.minutes(5)
-
-  For complex alert definitions (including sliding windows, debouncing intervals, and rate limits),
-  see the main `NatureWhistle` module documentation or the README.md file.
-
-  ## Fault Tolerance & Core Isolation
-
-  If the `NatureWhistle.Application` supervisor process terminates or crashes unexpectedly,
-  the host application's supervisor will automatically restart it. Upon recreation, all underlying
-  ETS tables are safely remade, global handlers are re-attached to the active telemetry dispatch pipeline,
-  and background processes are fresh-booted.
+  The module is intentionally small, but it is the most important piece of the
+  runtime because every other module depends on these ETS tables and processes
+  existing before the first telemetry event is handled.
   """
 
   use Application
@@ -82,6 +47,35 @@ defmodule NatureWhistle.Application do
     end
   end
 
+  @doc """
+  Normalizes application alert configuration and stores it in ETS.
+
+  `cpu_cores` is used to scale the default CPU run-queue alert so the threshold
+  remains proportional to the size of the current scheduler pool.
+
+  The loader accepts alerts written as keyword lists or maps. Each alert is
+  converted into a normalized map that contains the keys used by the runtime:
+
+  - `:id`
+  - `:event`
+  - `:measurement_key`
+  - `:threshold`
+  - `:formatter`
+  - `:alert_message`
+  - `:calm_message`
+  - `:debounce_ms`
+  - `:resolution_ms`
+  - `:sliding_window`
+  - `:rate_limit`
+  - `:notifiers`
+
+  For compatibility, the loader also accepts the older singular `:notifier`
+  key and promotes it to the `:notifiers` list used by the dispatcher.
+
+  The normalized alerts are grouped by telemetry event and written into the
+  `:nature_whistle_alerts` table. Existing table contents are cleared first so
+  the result reflects the current application configuration exactly.
+  """
   def load_config_into_ets(cpu_cores) do
     :ets.delete_all_objects(:nature_whistle_alerts)
     :ets.delete_all_objects(:nature_whistle_alert_state)
@@ -131,7 +125,7 @@ defmodule NatureWhistle.Application do
           resolution_ms: Map.get(alert, :resolution_ms, 60_000),
           sliding_window: Map.get(alert, :sliding_window),
           rate_limit: Map.get(alert, :rate_limit),
-          notifiers: Map.get(alert, :notifiers, [])
+          notifiers: Map.get(alert, :notifiers, List.wrap(Map.get(alert, :notifier, [:console])))
         }
 
         Map.update(acc, event, [alert_map], &[alert_map | &1])
@@ -175,6 +169,19 @@ defmodule NatureWhistle.Application do
     end)
   end
 
+  @doc """
+  Creates the application runtime.
+
+  The startup sequence is:
+
+  1. create the ETS tables if they do not already exist
+  2. load alert definitions from application config into ETS
+  3. attach one telemetry handler per configured event
+  4. validate retry settings
+  5. start the task supervisor and background cleaner
+
+  The function returns the result of the internal supervisor start-up.
+  """
   @impl true
   def start(_type, _args) do
     cpu_cores = System.schedulers_online()

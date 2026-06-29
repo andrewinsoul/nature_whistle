@@ -67,6 +67,23 @@ defmodule NatureWhistle.ApplicationTest do
     assert alert_map.threshold == 16
   end
 
+  test "load_config_into_ets/1 promotes legacy notifier keys into notifiers lists" do
+    custom_alerts = [
+      [
+        id: :legacy_console,
+        event: [:test, :legacy],
+        threshold: 1,
+        notifier: :console
+      ]
+    ]
+
+    Application.put_env(:nature_whistle, :alerts, custom_alerts)
+    NatureWhistle.Application.load_config_into_ets(4)
+
+    assert [{[:test, :legacy], [alert_map]}] = :ets.lookup(@alerts_table, [:test, :legacy])
+    assert alert_map.notifiers == [:console]
+  end
+
   test "start/2 raises configuration error if base_delay_ms exceeds max_delay_ms" do
     Application.put_env(:nature_whistle, :retry, base_delay_ms: 5000, max_delay_ms: 1000)
 
