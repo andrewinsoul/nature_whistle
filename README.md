@@ -4,10 +4,10 @@
   <img src="assets/img/nature_whistle.jpeg" alt="NatureWhistle Banner" width="100%">
 </p>
 
-[Nature Whistle CI](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml)  
-[Hex.pm version](https://hex.pm/packages/nature_whistle)  
-[Hex.pm downloads](https://hex.pm/packages/nature_whistle)  
-[Hex.pm License](https://github.com/andrewinsoul/nature_whistle/blob/main/LICENSE)
+[![Nature Whistle CI](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml/badge.svg?branch=main)](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml)
+[![Hex.pm version](https://img.shields.io/hexpm/v/nature_whistle)](https://hex.pm/packages/nature_whistle)
+[![Hex.pm downloads](https://img.shields.io/hexpm/dt/nature_whistle)](https://hex.pm/packages/nature_whistle)
+[![Hex.pm License](https://img.shields.io/hexpm/l/nature_whistle)](https://github.com/andrewinsoul/nature_whistle/blob/main/LICENSE)
 
 _Let your system whisper its troubles before they become screams._
 
