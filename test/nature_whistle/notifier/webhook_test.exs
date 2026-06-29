@@ -1,82 +1,58 @@
 defmodule NatureWhistle.Notifier.WebhookTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
-  test "simple body template" do
+  alias NatureWhistle.Notifier.Webhook
+
+  setup do
     bypass = Bypass.open()
+    original_retry = Application.get_env(:nature_whistle, :retry)
 
-    Bypass.expect(bypass, fn conn ->
-      {:ok, body, _} = Plug.Conn.read_body(conn)
-      assert body == ~s({"text":"Hello"})
-      Plug.Conn.resp(conn, 200, "ok")
+    Application.put_env(:nature_whistle, :retry,
+      max_attempts: 1,
+      base_delay_ms: 0,
+      max_delay_ms: 1
+    )
+
+    on_exit(fn ->
+      if original_retry do
+        Application.put_env(:nature_whistle, :retry, original_retry)
+      else
+        Application.delete_env(:nature_whistle, :retry)
+      end
     end)
 
-    config = [url: "http://localhost:#{bypass.port}/", body_template: :simple]
-    assert {:ok, :sent} = NatureWhistle.Notifier.Webhook.deliver("Hello", %{}, config)
+    {:ok, bypass: bypass}
   end
 
-  test "full body template" do
-    bypass = Bypass.open()
+  test "deliver/3 sends custom methods, headers and JSON payloads", %{bypass: bypass} do
+    Bypass.expect_once(bypass, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
 
-    Bypass.expect(bypass, fn conn ->
-      {:ok, body, _} = Plug.Conn.read_body(conn)
-      assert body =~ ~s("text":"Hello")
-      assert body =~ ~s("metadata":{})
-      assert body =~ ~s("timestamp":)
-      Plug.Conn.resp(conn, 200, "ok")
-    end)
-
-    config = [url: "http://localhost:#{bypass.port}/", body_template: :full]
-    assert {:ok, :sent} = NatureWhistle.Notifier.Webhook.deliver("Hello", %{}, config)
-  end
-
-  test "custom function body template" do
-    bypass = Bypass.open()
-
-    Bypass.expect(bypass, fn conn ->
-      {:ok, body, _} = Plug.Conn.read_body(conn)
-      assert body == ~s({"custom":"Hello"})
-      Plug.Conn.resp(conn, 200, "ok")
-    end)
-
-    custom = fn msg, _ -> %{custom: msg} end
-    config = [url: "http://localhost:#{bypass.port}/", body_template: custom]
-    assert {:ok, :sent} = NatureWhistle.Notifier.Webhook.deliver("Hello", %{}, config)
-  end
-
-  test "uses custom HTTP method" do
-    bypass = Bypass.open()
-
-    Bypass.expect(bypass, fn conn ->
       assert conn.method == "PUT"
+      assert Plug.Conn.get_req_header(conn, "x-api-key") == ["abc123"]
+      assert Plug.Conn.get_req_header(conn, "origin") == ["nature-whistle"]
+      assert Jason.decode!(body) == %{"text" => "payload", "severity" => "high"}
+
       Plug.Conn.resp(conn, 200, "ok")
     end)
 
-    config = [url: "http://localhost:#{bypass.port}/", method: :put]
-    assert {:ok, :sent} = NatureWhistle.Notifier.Webhook.deliver("test", %{}, config)
+    assert {:ok, :sent} =
+             Webhook.deliver(
+               "payload",
+               %{},
+               webhook_url: "http://localhost:#{bypass.port}",
+               method: :put,
+               headers: [{"x-api-key", "abc123"}, {"origin", "nature-whistle"}],
+               payload: %{severity: "high"}
+             )
   end
 
-  test "includes custom headers" do
-    bypass = Bypass.open()
-
-    Bypass.expect(bypass, fn conn ->
-      assert {"x-custom", "value"} in conn.req_headers
-      Plug.Conn.resp(conn, 200, "ok")
+  test "deliver/3 returns an error when the webhook endpoint fails", %{bypass: bypass} do
+    Bypass.expect_once(bypass, fn conn ->
+      Plug.Conn.resp(conn, 500, "boom")
     end)
 
-    config = [url: "http://localhost:#{bypass.port}/", headers: [{"x-custom", "value"}]]
-    assert {:ok, :sent} = NatureWhistle.Notifier.Webhook.deliver("test", %{}, config)
-  end
-
-  test "uses fallback body template for unknown value" do
-    bypass = Bypass.open()
-
-    Bypass.expect(bypass, fn conn ->
-      {:ok, body, _} = Plug.Conn.read_body(conn)
-      assert body == ~s({"text":"test"})
-      Plug.Conn.resp(conn, 200, "ok")
-    end)
-
-    config = [url: "http://localhost:#{bypass.port}/", body_template: :invalid]
-    assert {:ok, :sent} = NatureWhistle.Notifier.Webhook.deliver("test", %{}, config)
+    assert {:error, :max_attempts_exceeded} =
+             Webhook.deliver("payload", %{}, webhook_url: "http://localhost:#{bypass.port}")
   end
 end

@@ -13,11 +13,12 @@ defmodule NatureWhistle.Notifier.Retry do
 
   @default_max_attempts 3
   @default_base_delay_ms 1000
-  # 30 seconds
   @default_max_delay_ms 30_000
 
   @doc """
   Executes the given function, retrying on failure up to the configured max attempts.
+
+  max_delay should always be greater than base_delay
 
   The function must return `{:ok, _}` or `{:error, _}`.
   """
@@ -25,6 +26,7 @@ defmodule NatureWhistle.Notifier.Retry do
     max_attempts = max_attempts()
     base_delay = base_delay_ms()
     max_delay = max_delay_ms()
+
     do_retry(fun, max_attempts, base_delay, max_delay)
   end
 

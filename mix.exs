@@ -7,12 +7,16 @@ defmodule NatureWhistle.MixProject do
       version: "0.2.0",
       elixir: "~> 1.11",
       start_permanent: Mix.env() == :prod,
+      elixirc_paths: elixirc_paths(Mix.env()),
       description:
         "Telemetry-based alerting for Elixir apps – Slack, Teams, custom webhooks, and console with spike/resolution alerts",
       package: package(),
       deps: deps()
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   # Run "mix help compile.app" to learn about applications.
   def application do

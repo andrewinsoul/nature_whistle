@@ -55,4 +55,51 @@ defmodule NatureWhistle do
 
   You can implement your own notifier by implementing the `NatureWhistle.Notifier.Behaviour` callback.
   """
+
+  def default_alerts do
+    [
+      [
+        id: :high_memory,
+        event: [:vm, :memory, :total],
+        threshold: 1_073_741_824,
+        alert_message: "⚠️ High memory usage: %{value} MB",
+        calm_message: "✅ Memory usage back to normal: %{value} MB",
+        debounce_ms: 300_000,
+        rate_limit: [
+          window_ms: 60_000,
+          max_events: 10
+        ],
+        notifier: :console
+      ],
+      [
+        id: :high_cpu,
+        event: [:vm, :total_run_queue_lengths, :total],
+        threshold: 4,
+        alert_message: "🚨 High CPU load: run queue length is %{value}",
+        calm_message: "✅ CPU Queue length back to normal: %{value}",
+        debounce_ms: 60_000,
+        rate_limit: [window_ms: 60_000, max_events: 10],
+        sliding_window: [window_ms: 30_000, max_events: 3],
+        notifier: :console
+      ]
+    ]
+  end
+
+  @doc """
+  Retrieves a full alert configuration map from the application environment by its ID.
+  """
+  def get_alert_config(alert_id) do
+    alerts = Application.get_env(:nature_whistle, :alerts, default_alerts())
+
+    alerts =
+      Enum.map(alerts, fn alert ->
+        cond do
+          is_list(alert) -> Map.new(alert)
+          is_map(alert) -> alert
+          true -> %{}
+        end
+      end)
+
+    Enum.find(alerts, fn alert -> alert.id == alert_id end)
+  end
 end

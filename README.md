@@ -4,197 +4,247 @@
   <img src="assets/img/nature_whistle.jpeg" alt="NatureWhistle Banner" width="100%">
 </p>
 
-[![Nature Whistle CI](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml/badge.svg?branch=main)](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml)
-[![Hex.pm version](https://img.shields.io/hexpm/v/nature_whistle)](https://hex.pm/packages/nature_whistle)
-[![Hex.pm downloads](https://img.shields.io/hexpm/dt/nature_whistle)](https://hex.pm/packages/nature_whistle)
-[![Hex.pm License](https://img.shields.io/hexpm/l/nature_whistle)](https://github.com/andrewinsoul/nature_whistle/blob/main/LICENSE)
+[Nature Whistle CI](https://github.com/andrewinsoul/nature_whistle/actions/workflows/elixir.yml)  
+[Hex.pm version](https://hex.pm/packages/nature_whistle)  
+[Hex.pm downloads](https://hex.pm/packages/nature_whistle)  
+[Hex.pm License](https://github.com/andrewinsoul/nature_whistle/blob/main/LICENSE)
 
 _Let your system whisper its troubles before they become screams._
 
-**NatureWhistle** is an Elixir library that listens to `:telemetry` events and sends alerts to collaboration tools (Slack, Microsoft Teams, generic webhooks, or the console) when metric thresholds are crossed. It also sends resolution (“calm”) notifications when a metric returns to normal.
+**NatureWhistle** is a telemetry-driven alerting library for Elixir applications. It listens to `:telemetry` events, evaluates them against alert rules stored in ETS, and sends notifications to Slack, Microsoft Teams, generic webhooks, or the console.
 
-> The name combines “nature” – the author’s nickname – with “whistle”, because it sounds an alarm when something goes wrong and blows a calming note when the system recovers.
+It is designed for simple setup and low runtime overhead:
+
+- telemetry handlers run in the emitting process
+- alert definitions live in application config
+- notification delivery happens asynchronously through `Task.Supervisor`
+- alert state and rate-limiting data are tracked in ETS tables
+
+## How It Works
+
+```mermaid
+flowchart LR
+  T[:telemetry.execute] --> H[EventHandler]
+  H --> G[EventGuard]
+  G -->|breach allowed| S[State update]
+  S --> N[Notification]
+  N --> Q[Task.Supervisor]
+  Q --> C[Console / Slack / Teams / Webhook]
+  S --> B[BackgroundCleaner timer]
+  B -->|resolution reached| C2[Calm notification]
+  B -->|cleanup sweep| R[Prune stale ETS buckets]
+```
+
+When an event arrives:
+
+1. `NatureWhistle.EventHandler` looks up all alerts for that telemetry event.
+2. The measurement value is extracted from the telemetry payload.
+3. `NatureWhistle.EventGuard` applies rate-limit and sliding-window checks.
+4. If the breach is allowed, the alert state is marked as breached and an alert notification is queued.
+5. `NatureWhistle.BackgroundCleaner` later resolves the alert and sends the calm notification once the resolution timer expires.
 
 ## Features
 
-- 📊 **Telemetry‑driven** – works with any `:telemetry` event (VM metrics, Phoenix, Ecto, Oban, custom application metrics).
-- 🚨 **Spike + resolution alerts** – be notified both when a problem starts **and** when it resolves.
-- ⚙️ **Configurable thresholds** – set per‑alert thresholds, cooldowns, and resolution stabilisation periods.
-- 🔌 **Multiple notifiers** – Slack, Microsoft Teams, generic webhook, console (for development).
-- 🔁 **Automatic retries** – exponential backoff with configurable attempts and delay caps for HTTP notifiers.
-- 🧩 **Extensible** – implement your own notifier as a module using the `NatureWhistle.Notifier.Behaviour` or customise request bodies.
-- 💼 **Ready for production** – fault‑tolerant via host supervision, ETS storage, and safe telemetry handling.
+- Telemetry-driven alerts for any Elixir or Erlang application
+- Alert and calm notifications
+- Built-in console, Slack, Teams, and generic webhook notifiers
+- Exponential retry for HTTP delivery
+- ETS-backed state for fast lookup and minimal runtime coupling
+- Optional rate limiting and sliding-window suppression
+- Custom value formatting for alert messages
 
-## Installation
+## 🚀 Installation & Setup
 
 Add `nature_whistle` to your `mix.exs` dependencies:
 
 ```elixir
 defp deps do
   [
-    {:nature_whistle, "~> 0.2.0"}
+    {:nature_whistle, "~> 0.3.0"}
   ]
 end
 ```
 
-Then run mix deps.get.
-
-### Configuration
-
-Configuration is placed in your host application’s config/config.exs. You can define alerts, notifiers, and retry behaviour.
-
-### Basic example
+Then add `NatureWhistle.Application` to your supervision tree:
 
 ```elixir
-import Config
+def start(_type, _args) do
+  children = [
+    MyApp.Repo,
+    MyAppWeb.Endpoint,
+    NatureWhistle.Application
+  ]
 
+  Supervisor.start_link(children, strategy: :one_for_one)
+end
+```
+
+## Configuration
+
+Configure NatureWhistle from `config/config.exs`:
+
+```elixir
 config :nature_whistle,
-  alerts: [
+  retry: [
+    max_attempts: 5,
+    base_delay_ms: 1_000,
+    max_delay_ms: 60_000
+  ],
+  notifiers_config: [
+    %{name: :console, service: :console, config: %{}},
     %{
-      id: :high_memory,
-      event: [:vm, :memory, :total],
-      measurement_key: :total,
-      threshold: 1_073_741_824,        # 1 GB
-      alert_message: "🚨 High memory: %{value} MB",
-      calm_message: "✅ Memory back to normal: %{value} MB",
-      cooldown_ms: 300_000,            # 5 minutes
-      resolution_ms: 60_000,           # 1 minute
-      notifier: :slack
+      name: :slack_primary,
+      service: :slack,
+      config: %{webhook_url: "https://hooks.slack.com/services/T00/B00/X00"}
+    },
+    %{
+      name: :ops_webhook,
+      service: :webhook,
+      config: %{
+        webhook_url: "https://api.example.com/alerts",
+        method: :post,
+        headers: [{"x-api-key", "secret"}],
+        payload: %{source: "nature_whistle"}
+      }
     }
   ],
-  notifiers: [
-    slack: [webhook_url: "https://hooks.slack.com/services/..."],
-    console: []   # optional, always available as fallback
-  ],
-  retry: [
-    max_attempts: 3,
-    base_delay_ms: 1000,
-    max_delay_ms: 30_000
+  alerts: [
+    %{
+      id: :high_cpu_load,
+      event: [:vm, :total_run_queue_lengths, :total],
+      measurement_key: :total,
+      threshold: 4,
+      alert_message: "🚨 High CPU load: run queue is %{value}",
+      calm_message: "✅ CPU load back to normal: %{value}",
+      resolution_ms: 60_000,
+      rate_limit: [window_ms: 60_000, max_events: 10],
+      sliding_window: [window_ms: 30_000, max_events: 3],
+      notifiers: [:console]
+    },
+    %{
+      id: :api_latency,
+      event: [:my_app, :request, :stop],
+      measurement_key: :duration,
+      threshold: 500,
+      formatter: fn duration -> "#{div(duration, 1_000)} ms" end,
+      alert_message: "⚠️ Slow request: %{value}",
+      calm_message: "✅ Request latency recovered: %{value}",
+      resolution_ms: 30_000,
+      notifiers: [:slack_primary, :ops_webhook]
+    }
   ]
 ```
 
-### Alert fields
+## Alert Reference
 
-| Field             | Required                | Description                                                                                            |
-| ----------------- | ----------------------- | ------------------------------------------------------------------------------------------------------ |
-| `id`              | ✅                      | Unique identifier for this alert (used for state & cooldown).                                          |
-| `event`           | ✅                      | Telemetry event name as a list of atoms, e.g. `[:vm, :memory, :total]`.                                |
-| `measurement_key` | ❌ (default `:value`)   | Key inside the `measurements` map that holds the numeric value (e.g. `:duration`, `:total`).           |
-| `threshold`       | ✅                      | Numeric value that triggers the alert (when `value >= threshold`).                                     |
-| `alert_message`   | ❌                      | Message sent when threshold is crossed. Use `%{value}` as placeholder.                                 |
-| `calm_message`    | ❌                      | Message sent when metric stays below threshold for `resolution_ms` after a spike.                      |
-| `cooldown_ms`     | ❌ (default 60 000)     | Minimum time between repeated alert messages while the metric remains high.                            |
-| `resolution_ms`   | ❌ (default 60 000)     | Time the metric must stay below threshold before sending the calm message.                             |
-| `notifier`        | ❌ (default `:console`) | One of `:slack`, `:teams`, `:webhook`, or `:console`.                                                  |
-| `notifier_config` | ❌                      | Keyword list passed as the third argument to a custom notifier module. Ignored for built‑in notifiers. |
+| Field             | Required                     | Description                                                                                                                  |
+| ----------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `id`              | Yes                          | Unique alert identifier used for ETS state.                                                                                  |
+| `event`           | Yes                          | Telemetry event name, for example `[:vm, :memory, :total]`.                                                                  |
+| `measurement_key` | No, defaults to `:value`     | Key in the telemetry measurements map that holds the numeric value.                                                          |
+| `threshold`       | Yes                          | Alert triggers when `value >= threshold`.                                                                                    |
+| `alert_message`   | No                           | Message used when the metric crosses the threshold. Supports `%{value}`.                                                     |
+| `calm_message`    | No                           | Message used when the metric returns to normal. Supports `%{value}`.                                                         |
+| `formatter`       | No                           | Optional one-argument function for custom value formatting.                                                                  |
+| `resolution_ms`   | No, defaults to `60_000`     | How long the metric must stay below the threshold before a calm message is sent.                                             |
+| `notifiers`       | No, defaults to `[:console]` | List of notifier profile names to use for this alert.                                                                        |
+| `rate_limit`      | No, defaults to `nil`        | Optional traffic cap that blocks repeated dispatches once `max_events` are seen within `window_ms`.                          |
+| `sliding_window`  | No, defaults to `nil`        | Optional breach-density gate that counts recent breaches in rolling buckets and suppresses alerting once the cap is reached. |
 
-### Notifier configuration
+### Important note on timing
 
-Notifiers are configured under the `:notifiers` key. Each notifier expects a keyword list of options:
+The current runtime uses `resolution_ms` as the active alert lifecycle timer. The alert remains in a breached state until that timer expires or is extended by another breach. `debounce_ms` is stored in the loaded alert config, but it is not part of the active runtime decision path yet.
 
-- **Slack** / **Teams**  
-  `slack: [webhook_url: "https://hooks.slack.com/..."]`  
-  `teams: [webhook_url: "https://outlook.office.com/webhook/..."]`
+## Notifier Profiles
 
-- **Webhook (generic)**
+`notifiers_config` defines the actual delivery endpoints, and each alert chooses from those profiles by name.
 
-  ```elixir
-  webhook: [
-    url: "https://my.service/hook",
-    method: :post,                 # default :post
+### Console
+
+```elixir
+%{name: :console, service: :console, config: %{}}
+```
+
+### Slack
+
+```elixir
+%{
+  name: :slack_primary,
+  service: :slack,
+  config: %{webhook_url: "https://hooks.slack.com/services/..."}
+}
+```
+
+### Teams
+
+```elixir
+%{
+  name: :teams_primary,
+  service: :teams,
+  config: %{webhook_url: "https://outlook.office.com/webhook/..."}
+}
+```
+
+### Generic webhook
+
+```elixir
+%{
+  name: :ops_webhook,
+  service: :webhook,
+  config: %{
+    webhook_url: "https://your.service/hook",
+    method: :post,
     headers: [{"x-api-key", "abc"}],
-    body_template: :simple        # or :full, or a custom function
-  ]
-  ```
-
-> 💡 For advanced integrations, you can write your own notifier module (see [Custom notifier modules](#custom-notifier-modules)).
-
-### Custom notifier modules
-
-If you need to send alerts to a service not built into `nature_whistle` (e.g., Discord, Opsgenie, a custom internal API), you can write your own notifier module that implements the `NatureWhistle.Notifier.Behaviour`.
-
-#### Example: Discord notifier
-
-```elixir
-defmodule MyApp.DiscordNotifier do
-  @behaviour NatureWhistle.Notifier.Behaviour
-
-  def deliver(message, _metadata, config) do
-    url = Keyword.fetch!(config, :webhook_url)
-    payload = %{content: message}
-    case Req.post(url, json: payload) do
-      {:ok, %Req.Response{status: 200}} -> {:ok, :sent}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-end
-```
-
-Then reference your module in the alert configuration:
-
-```elixir
-config :nature_whistle, alerts: [
-  %{
-    id: :my_alert,
-    event: [:my, :event],
-    threshold: 100,
-    alert_message: "Alert! %{value}",
-    notifier: MyApp.DiscordNotifier,
-    notifier_config: [webhook_url: "https://discord.com/api/webhooks/..."]
+    payload: %{source: "nature_whistle"}
   }
-]
+}
 ```
 
-> The :notifier_config field is optional and can contain any keyword list – it will be passed as the third argument to your module’s deliver/3 function. Built‑in notifiers ignore this field.
+## Built-in Behavior
 
-### Retry settings
+- `NatureWhistle.Application`
+  - creates the ETS tables `:nature_whistle_alerts`, `:nature_whistle_alert_state`, and `:nature_whistle_rate_limit`
+  - loads alert config into ETS
+  - attaches telemetry handlers for each configured event
+  - starts `NatureWhistle.TaskSupervisor`
+  - starts `NatureWhistle.BackgroundCleaner`
+- `NatureWhistle.EventHandler`
+  - extracts the configured measurement
+  - checks rate limits and sliding windows
+  - starts or extends the resolution timer
+  - queues alert notifications
+- `NatureWhistle.BackgroundCleaner`
+  - sends calm notifications when resolution timers expire
+  - prunes stale rate-limit and sliding-window buckets on sweep
+- `NatureWhistle.Notification`
+  - formats values
+  - expands `%{value}` in messages
+  - dispatches to the chosen notifier profile asynchronously
+- `NatureWhistle.Notifier.Retry`
+  - retries failed HTTP requests with exponential backoff
 
-Under the :retry key you can configure:
+## Default Alerts
 
-- max_attempts – how many times to retry (default 3)
+If you do not define `:alerts`, NatureWhistle ships with two built-in console alerts:
 
-- base_delay_ms – initial delay in milliseconds (default 1000)
+- high memory usage
+- high CPU run-queue length
 
-- max_delay_ms – upper bound for the exponential backoff (default 30 000)
+The CPU run-queue alert is scaled by the number of schedulers on startup, so it stays proportional to the machine it is running on.
 
-### Starting NatureWhistle
+## Telemetry Example
 
-Add NatureWhistle.Application to your application’s supervision tree. This ensures the package is started, its ETS tables are created, and telemetry handlers are attached.
-
-```elixir
- # lib/my_app/application.ex
-def start(_type, _args) do
- children = [
-   MyApp.Repo,
-   MyAppWeb.Endpoint,
-   NatureWhistle.Application      # <-- add this line
- ]
- Supervisor.start_link(children, strategy: :one_for_one)
-end
-```
-
-### Note:
-
-`nature_whistle` works with **any Elixir (or Erlang) application** that emits `:telemetry` events – it does not require Phoenix. Simply add `NatureWhistle.Application` as a child of your application's supervision tree.
-
-### Usage
-
-Once configured and started, nature_whistle automatically listens to telemetry events. You do not need to call any additional functions – just emit events as usual.
-
-### Emitting custom telemetry events
-
-Your application can emit its own events, and nature_whistle will alert on them if you add a corresponding alert entry.
+Emit your own telemetry event like this:
 
 ```elixir
- # Example: emit a slow query event
 :telemetry.execute(
   [:my_app, :db, :query],
-  %{duration: 650},                     # value under :duration
+  %{duration: 650},
   %{query: "SELECT * FROM users"}
 )
 ```
 
-Then define an alert:
+Then add a matching alert:
 
 ```elixir
 %{
@@ -202,69 +252,30 @@ Then define an alert:
   event: [:my_app, :db, :query],
   measurement_key: :duration,
   threshold: 500,
-  alert_message: "🐢 Slow query: %{value} ms",
-  calm_message: "✅ Query speed recovered: %{value} ms"
+  alert_message: "🐢 Slow query: %{value}",
+  calm_message: "✅ Query speed recovered: %{value}",
+  resolution_ms: 60_000,
+  notifiers: [:console]
 }
 ```
 
-### Default alerts
+## Message Formatting
 
-If you do not specify any :alerts, nature_whistle provides two built‑in alerts that use the console notifier:
+- `%{value}` is replaced with the current measurement value.
+- `[:vm, :memory, :total]` values are automatically rendered in megabytes.
+- If a custom `formatter` raises, NatureWhistle falls back to `to_string/1` and logs the formatter error.
 
-- High memory (1 GB threshold)
+## Why NatureWhistle
 
-- High CPU run queue length (threshold 5)
+NatureWhistle sits between raw telemetry and full observability stacks. If you already emit metrics with tools like Phoenix, Ecto, Oban, or PromEx, it gives you a lightweight alerting path without introducing a separate alert manager or a new service to operate.
 
-This ensures the package is never idle – you will always see warnings in the logs if there is any spike.
+Use it when you want:
 
-## How it works
+- immediate notification on threshold breaches
+- a calm message when the system recovers
+- simple config-driven alerting
+- minimal overhead in the hot path
 
-- On startup, `NatureWhistle.Application` creates three ETS tables:
-  - `:nature_whistle_alerts` – stores alerts indexed by telemetry event
-  - `:nature_whistle_notifiers` – stores notifier configurations
-  - `:nature_whistle_alert_state` – tracks current state (`:firing` or `:calm`) and timestamps
-- Telemetry handlers are attached for every event that has at least one alert.
-- When a telemetry event occurs, the handler extracts the numeric value using the configured `measurement_key`, compares it with the threshold, and updates the state machine.
-- If the value rises above threshold, an **alert** message is sent (respecting cooldown). If the value later stays below threshold for `resolution_ms`, a **calm** message is sent.
-- HTTP notifiers automatically retry failed requests using exponential backoff with configurable attempts and delay cap.
+## License
 
-### Fault tolerance & supervision
-
-- NatureWhistle.Application is meant to be added as a child of your main supervisor. If it crashes, the host supervisor restarts it, re‑creating all ETS tables and re‑attaching handlers.
-
-- Telemetry handlers run inside the process that emitted the event. They are wrapped in try/rescue to prevent any exception from crashing the host process. Errors are logged, and alert evaluation continues for subsequent events.
-
-## Customising messages
-
-Both `alert_message` and `calm_message` support the `%{value}` placeholder, which is replaced with the current metric value (converted to a string). Memory values for `[:vm, :memory, :total]` are automatically formatted as megabytes for readability. For all other metrics, the raw value is inserted as a string.
-
-> **Future enhancement** – A future version of `nature_whistle` will allow you to provide a custom formatting function per alert (e.g., converting microseconds to milliseconds, adding units). Currently, formatting is limited to built‑in VM memory conversion.
-
-## Integration with PromEx
-
-[PromEx](https://github.com/akoutmos/prom_ex) is a powerful Elixir library that collects and exposes application metrics to Prometheus (and then to Grafana for visualisation). However, PromEx itself **does not send alerts** – you would need to add Prometheus + Alertmanager to get Slack or Teams notifications.
-
-This is where `nature_whistle` becomes the perfect lightweight companion. Both libraries listen to the same `:telemetry` events, so you can run them side by side:
-
-- **PromEx** handles metric aggregation, storage, and dashboards (via Prometheus + Grafana) for long‑term visibility.
-- **nature_whistle** provides instant, no‑infrastructure alerts to Slack, Teams, or any webhook – directly from your Elixir application.
-
-You get the best of both worlds: rich visualisations for debugging trends and direct, low‑latency alerts for critical spikes. No separate Alertmanager setup, no PromQL to learn. Just add `nature_whistle` to your supervision tree, configure your thresholds, and you’re done.
-
-> **Pro tip:** You can even use `nature_whistle` to alert on the same custom telemetry events that PromEx exposes – giving you a complete monitoring story with almost zero operational overhead.
-
-## Performance considerations
-
-NatureWhistle is designed for low to medium telemetry volume (dozens to hundreds of events per second). It processes each event synchronously in the caller process, and HTTP alerts are sent directly from that process.
-
-For very high‑volume systems (thousands of events per second), consider using a purpose-built observability stack like Prometheus + Alertmanager or a hosted monitoring service. **A future version of NatureWhistle will introduce asynchronous processing and batching to support higher throughput.** Stay tuned.
-
-## Contributing & Feedback
-
-NatureWhistle is an open source project that thrives on community input. Whether you have a bug report, a feature request, a question, or want to contribute code, you are very welcome.
-
-- **Issues & Discussions** – Please use the GitHub issue tracker to report bugs or suggest enhancements. For questions or general feedback, start a Discussion.
-- **Pull Requests** – Contributions are encouraged. If you plan to add a non‑trivial feature, open an issue first to discuss the design.
-- **Roadmap** – Future ideas include custom value formatters, more notifiers (Discord, Mattermost, Opsgenie), and configurable retry per notifier. Your feedback helps prioritise.
-
-Let’s make `nature_whistle` the go‑to alerting toolkit for the Elixir ecosystem. 🌿🔊
+MIT

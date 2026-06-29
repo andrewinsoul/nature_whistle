@@ -6,9 +6,14 @@ defmodule NatureWhistle.Notifier.Teams do
 
   In your `config/config.exs`:
 
-      config :nature_whistle, notifiers: [
-        teams: [webhook_url: "https://outlook.office.com/webhook/..."]
-      ]
+    config :nature_whistle, notifiers: [
+      %{
+        name: :slack,
+        config: %{
+          webhook_url: "https://hooks.discord.com/services/](https://hooks.slack.com/services/"
+        }
+      }
+    ]
 
   The only required option is `:webhook_url`.
 
@@ -20,7 +25,14 @@ defmodule NatureWhistle.Notifier.Teams do
 
   @impl true
   def deliver(message, _metadata, config) do
-    webhook_url = Keyword.fetch!(config, :webhook_url)
+    config =
+      cond do
+        is_list(config) -> Map.new(config)
+        is_map(config) -> config
+        true -> %{}
+      end
+
+    webhook_url = Map.fetch!(config, :webhook_url)
     payload = %{text: message}
 
     Retry.with_retry(fn ->

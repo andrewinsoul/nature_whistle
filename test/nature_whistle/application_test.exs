@@ -1,59 +1,77 @@
+# File: test/nature_whistle/application_test.exs
 defmodule NatureWhistle.ApplicationTest do
   use ExUnit.Case, async: false
 
+  @alerts_table :nature_whistle_alerts
+  @state_table :nature_whistle_alert_state
+  @rate_limit_table :nature_whistle_rate_limit
+
   setup do
-    for table <- [:nature_whistle_alerts, :nature_whistle_notifiers, :nature_whistle_alert_state] do
-      if :ets.whereis(table) != :undefined do
-        :ets.delete_all_objects(table)
-      end
-    end
+    original_alerts = Application.get_env(:nature_whistle, :alerts)
+    original_retry = Application.get_env(:nature_whistle, :retry)
+
+    on_exit(fn ->
+      if original_alerts,
+        do: Application.put_env(:nature_whistle, :alerts, original_alerts),
+        else: Application.delete_env(:nature_whistle, :alerts)
+
+      if original_retry,
+        do: Application.put_env(:nature_whistle, :retry, original_retry),
+        else: Application.delete_env(:nature_whistle, :retry)
+    end)
 
     :ok
   end
 
-  test "creates ETS tables on start" do
-    assert :ets.whereis(:nature_whistle_alerts) != :undefined
-    assert :ets.whereis(:nature_whistle_notifiers) != :undefined
-    assert :ets.whereis(:nature_whistle_alert_state) != :undefined
+  test "creates core ETS tables upon start" do
+    assert :ets.info(@alerts_table) != :undefined
+    assert :ets.info(@state_table) != :undefined
+    assert :ets.info(@rate_limit_table) != :undefined
   end
 
-  test "loads default alerts when none configured" do
-    # Temporarily remove custom config
-    Application.delete_env(:nature_whistle, :alerts)
-    Application.delete_env(:nature_whistle, :notifiers)
-
-    NatureWhistle.Application.load_config_into_ets(System.schedulers_online())
-
-    alerts = :ets.lookup(:nature_whistle_alerts, [:vm, :memory, :total])
-
-    assert length(alerts) == 1
-
-    [{_, alert_list}] = alerts
-
-    assert is_list(alert_list)
-    alert = hd(alert_list)
-    assert alert.id == :high_memory
-    assert alert.threshold == 1_073_741_824
-  end
-
-  test "loads user provided alerts" do
+  test "load_config_into_ets/1 correctly converts and loads configurations" do
     custom_alerts = [
-      %{
-        id: :test_alert,
-        event: [:test, :event],
+      [
+        id: :high_cpu,
+        event: [:test, :cpu],
+        threshold: 80,
         measurement_key: :value,
-        threshold: 100,
-        alert_message: "Test alert",
-        calm_message: "Test calm",
         notifier: :console
-      }
+      ]
     ]
 
     Application.put_env(:nature_whistle, :alerts, custom_alerts)
-    NatureWhistle.Application.load_config_into_ets(System.schedulers_online())
-    alerts = :ets.lookup(:nature_whistle_alerts, [:test, :event])
-    assert length(alerts) == 1
-    [{_, [alert]}] = alerts
-    assert alert.id == :test_alert
+    NatureWhistle.Application.load_config_into_ets(4)
+
+    assert [{[:test, :cpu], [alert_map]}] = :ets.lookup(@alerts_table, [:test, :cpu])
+    assert alert_map.id == :high_cpu
+    assert alert_map.threshold == 80
+  end
+
+  test "load_config_into_ets/1 scales threshold for total run queue lengths by cpu cores" do
+    queue_event = [:vm, :total_run_queue_lengths, :total]
+
+    custom_alerts = [
+      [
+        id: :run_queue,
+        event: queue_event,
+        threshold: 2,
+        notifier: :console
+      ]
+    ]
+
+    Application.put_env(:nature_whistle, :alerts, custom_alerts)
+    NatureWhistle.Application.load_config_into_ets(8)
+
+    assert [{^queue_event, [alert_map]}] = :ets.lookup(@alerts_table, queue_event)
+    assert alert_map.threshold == 16
+  end
+
+  test "start/2 raises configuration error if base_delay_ms exceeds max_delay_ms" do
+    Application.put_env(:nature_whistle, :retry, base_delay_ms: 5000, max_delay_ms: 1000)
+
+    assert_raise RuntimeError, ~r/NatureWhistle Configuration Error/, fn ->
+      NatureWhistle.Application.start(:normal, [])
+    end
   end
 end

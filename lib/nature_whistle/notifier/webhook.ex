@@ -7,43 +7,49 @@ defmodule NatureWhistle.Notifier.Webhook do
   In your `config/config.exs`:
 
       config :nature_whistle, notifiers: [
-        webhook: [
-          url: "https://your.service/hook",
-          method: :post,                # default :post
-          headers: [{"x-api-key", "abc"}],
-          body_template: :simple        # or :full, or a custom function
-        ]
+        %{
+          name: :webhook,
+          config: %{
+            webhook_url: "https://your.service/hook"
+            method: :post, # default :post
+            headers: [{"x-api-key", "abc"}, {"Origin", "origin"}],
+            payload: %{text: "alert message"}
+          }
+        }
       ]
 
   ### Options
 
-  * `:url` – required, the HTTP endpoint.
+  * `:webhook_url` – required, the HTTP endpoint.
   * `:method` – optional, default `:post`. Can be `:put`, `:delete`, etc.
   * `:headers` – optional, list of `{header, value}` tuples.
-  * `:body_template` – optional, controls the JSON payload:
-    - `:simple` – sends `%{text: message}` (default).
-    - `:full` – sends `%{text: message, metadata: metadata, timestamp: ...}`.
-    - a function of arity 2 – receives `(message, metadata)` and returns a map.
+  * `:payload` – optional, controls the JSON payload:, defaults to %{text: "alert or calm message"}
 
   This notifier automatically retries failed requests (3 attempts by default) with exponential backoff.
   Retry settings can be adjusted under the `:retry` key in the `:nature_whistle` configuration.
   """
 
-  @behaviour NatureWhistle.Notifier.Behaviour
-
   alias NatureWhistle.Notifier.Retry
 
-  @impl true
-  def deliver(message, metadata, config) do
-    url = Keyword.fetch!(config, :url)
-    method = Keyword.get(config, :method, :post)
-    headers = Keyword.get(config, :headers, [])
-    body_template = Keyword.get(config, :body_template, :simple)
+  @behaviour NatureWhistle.Notifier.Behaviour
 
-    body = build_body(body_template, message, metadata)
+  @impl true
+  def deliver(message, _metadata, config) do
+    config =
+      cond do
+        is_list(config) -> Map.new(config)
+        is_map(config) -> config
+        true -> nil
+      end
+
+    webhook_url = Map.fetch!(config, :webhook_url)
+    custom_payload = Map.get(config, :payload, %{})
+    payload = Map.put(custom_payload, :text, message)
+    headers = Map.get(config, :headers, [])
+    method = Map.get(config, :method, :post)
 
     Retry.with_retry(fn ->
-      case Req.request(method: method, url: url, headers: headers, json: body) do
+      case Req.request(method: method, url: webhook_url, headers: headers, json: payload) do
         {:ok, %Req.Response{status: status}} when status in 200..299 ->
           {:ok, :sent}
 
@@ -54,25 +60,5 @@ defmodule NatureWhistle.Notifier.Webhook do
           {:error, reason}
       end
     end)
-  end
-
-  defp build_body(:simple, message, _metadata) do
-    %{text: message}
-  end
-
-  defp build_body(:full, message, metadata) do
-    %{
-      text: message,
-      metadata: metadata,
-      timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
-    }
-  end
-
-  defp build_body(custom_fun, message, metadata) when is_function(custom_fun, 2) do
-    custom_fun.(message, metadata)
-  end
-
-  defp build_body(_, message, _metadata) do
-    %{text: message}
   end
 end
