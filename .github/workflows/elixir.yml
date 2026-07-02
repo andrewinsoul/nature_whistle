@@ -2,9 +2,9 @@ name: Elixir CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
 
 jobs:
   ci:
@@ -12,36 +12,3 @@ jobs:
     with:
       elixir_version: "1.19.5"
       otp_version: "28"
-
-  build:
-    name: Build and test
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Elixir
-        uses: erlef/setup-beam@v1
-        with:
-          elixir-version: 1.18.0
-          otp-version: 27.0
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            deps
-            _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-mix-
-
-      - name: Install dependencies
-        run: mix deps.get
-
-      - name: Compile (warnings as errors)
-        run: mix compile --warnings-as-errors
-
-      - name: Run tests
-        run: mix test
