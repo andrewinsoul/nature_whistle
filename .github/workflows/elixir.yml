@@ -7,6 +7,12 @@ on:
     branches: [ main, master ]
 
 jobs:
+  ci:
+    uses: bennydreamtech23/precheck-developer/.github/workflows/elixir-ci.yml@master
+    with:
+      elixir_version: "1.19.5"
+      otp_version: "28"
+
   build:
     name: Build and test
     runs-on: ubuntu-latest
