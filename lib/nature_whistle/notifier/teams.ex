@@ -1,26 +1,36 @@
 defmodule NatureWhistle.Notifier.Teams do
   @moduledoc """
-  Sends alerts to a Microsoft Teams channel via incoming webhook.
+  Microsoft Teams webhook delivery backend.
 
-  ## Configuration
+  Teams delivery mirrors the Slack notifier closely: the message is wrapped in a
+  `%{text: message}` payload and POSTed to the configured webhook URL.
 
-  In your `config/config.exs`:
+  Required config:
 
-      config :nature_whistle, notifiers: [
-        teams: [webhook_url: "https://outlook.office.com/webhook/..."]
-      ]
+  - `:webhook_url` - the Teams incoming webhook endpoint
 
-  The only required option is `:webhook_url`.
-
-  This notifier automatically retries failed requests (3 attempts by default) with exponential backoff.
-  Retry settings can be adjusted under the `:retry` key in the `:nature_whistle` configuration.
+  Retry handling is shared with the other HTTP notifiers through
+  `NatureWhistle.Notifier.Retry`.
   """
   alias NatureWhistle.Notifier.Retry
   @behaviour NatureWhistle.Notifier.Behaviour
 
   @impl true
+  @doc """
+  Delivers a Teams message using an incoming webhook.
+
+  The notifier expects a successful `2xx` response. Any other response or
+  transport error is retried according to the configured retry policy.
+  """
   def deliver(message, _metadata, config) do
-    webhook_url = Keyword.fetch!(config, :webhook_url)
+    config =
+      cond do
+        is_list(config) -> Map.new(config)
+        is_map(config) -> config
+        true -> %{}
+      end
+
+    webhook_url = Map.fetch!(config, :webhook_url)
     payload = %{text: message}
 
     Retry.with_retry(fn ->
