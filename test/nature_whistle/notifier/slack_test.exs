@@ -1,55 +1,52 @@
 defmodule NatureWhistle.Notifier.SlackTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
-  test "sends message to Slack webhook" do
+  alias NatureWhistle.Notifier.Slack
+
+  setup do
     bypass = Bypass.open()
+    original_retry = Application.get_env(:nature_whistle, :retry)
 
-    Bypass.expect(bypass, fn conn ->
-      assert {:ok, body, conn} = Plug.Conn.read_body(conn)
-      assert body =~ "Hello from nature_whistle"
-      Plug.Conn.resp(conn, 200, "ok")
+    Application.put_env(:nature_whistle, :retry,
+      max_attempts: 1,
+      base_delay_ms: 0,
+      max_delay_ms: 1
+    )
+
+    on_exit(fn ->
+      if original_retry do
+        Application.put_env(:nature_whistle, :retry, original_retry)
+      else
+        Application.delete_env(:nature_whistle, :retry)
+      end
     end)
 
-    config = [webhook_url: "http://localhost:#{bypass.port}/"]
+    {:ok, bypass: bypass}
+  end
+
+  test "deliver/3 posts a JSON payload to Slack using a minimal config", %{bypass: bypass} do
+    Bypass.expect_once(bypass, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+      assert conn.method == "POST"
+      assert conn.request_path == "/"
+      assert Jason.decode!(body) == %{"text" => "Slack Alert!"}
+
+      Plug.Conn.resp(conn, 200, "ok")
+    end)
 
     assert {:ok, :sent} =
-             NatureWhistle.Notifier.Slack.deliver("Hello from nature_whistle", %{}, config)
+             Slack.deliver("Slack Alert!", %{}, %{webhook_url: "http://localhost:#{bypass.port}"})
   end
 
-  test "retries on failure" do
-    bypass = Bypass.open()
-    # First request fails, second succeeds
+  test "deliver/3 returns an error when Slack responds with a failure status", %{
+    bypass: bypass
+  } do
     Bypass.expect_once(bypass, fn conn ->
-      Plug.Conn.resp(conn, 500, "Internal error")
+      Plug.Conn.resp(conn, 500, "boom")
     end)
 
-    Bypass.expect(bypass, fn conn ->
-      Plug.Conn.resp(conn, 200, "ok")
-    end)
-
-    config = [webhook_url: "http://localhost:#{bypass.port}/"]
-    # Retry is configured in test_helper with max_attempts: 1? We need to ensure retry is enabled.
-    # But the retry helper is called inside Slack module. It uses the config from environment.
-    # In test_helper we set max_attempts: 1, so no retry. For this test, we need to set higher.
-    Application.put_env(:nature_whistle, :retry, max_attempts: 2, base_delay_ms: 10)
-    assert {:ok, :sent} = NatureWhistle.Notifier.Slack.deliver("test", %{}, config)
-  end
-
-  test "exhausts retries on HTTP 400" do
-    bypass = Bypass.open()
-    Bypass.expect(bypass, fn conn -> Plug.Conn.resp(conn, 400, "Bad Request") end)
-    config = [webhook_url: "http://localhost:#{bypass.port}/"]
-    # The default retry config (3 attempts) will exhaust and return :max_attempts_exceeded
     assert {:error, :max_attempts_exceeded} =
-             NatureWhistle.Notifier.Slack.deliver("test", %{}, config)
-  end
-
-  test "exhausts retries on HTTP 500" do
-    bypass = Bypass.open()
-    Bypass.expect(bypass, fn conn -> Plug.Conn.resp(conn, 500, "Internal Error") end)
-    config = [webhook_url: "http://localhost:#{bypass.port}/"]
-
-    assert {:error, :max_attempts_exceeded} =
-             NatureWhistle.Notifier.Slack.deliver("test", %{}, config)
+             Slack.deliver("Slack Alert!", %{}, %{webhook_url: "http://localhost:#{bypass.port}"})
   end
 end

@@ -1,26 +1,36 @@
 defmodule NatureWhistle.Notifier.Slack do
   @moduledoc """
-  Sends alerts to a Slack channel via incoming webhook.
+  Slack webhook delivery backend.
 
-  ## Configuration
+  This notifier sends a single JSON payload of the form `%{text: message}` to a
+  Slack incoming webhook URL. It accepts its configuration as either a map or a
+  keyword list, which makes it easy to place directly in application config.
 
-  In your `config/config.exs`:
+  Required config:
 
-      config :nature_whistle, notifiers: [
-        slack: [webhook_url: "https://hooks.slack.com/services/..."]
-      ]
+  - `:webhook_url` - the Slack incoming webhook endpoint
 
-  The only required option is `:webhook_url`.
-
-  This notifier automatically retries failed requests (3 attempts by default) with exponential backoff.
-  Retry settings can be adjusted under the `:retry` key in the `:nature_whistle` configuration.
+  All HTTP retry behavior is delegated to `NatureWhistle.Notifier.Retry`.
   """
   alias NatureWhistle.Notifier.Retry
   @behaviour NatureWhistle.Notifier.Behaviour
 
   @impl true
+  @doc """
+  Delivers a Slack message using an incoming webhook.
+
+  The payload is always `%{text: message}`. Any non-success HTTP status or
+  transport error is retried according to the configured retry policy.
+  """
   def deliver(message, _metadata, config) do
-    webhook_url = Keyword.fetch!(config, :webhook_url)
+    config =
+      cond do
+        is_list(config) -> Map.new(config)
+        is_map(config) -> config
+        true -> %{}
+      end
+
+    webhook_url = Map.fetch!(config, :webhook_url)
     payload = %{text: message}
 
     Retry.with_retry(fn ->

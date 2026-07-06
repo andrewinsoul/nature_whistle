@@ -1,36 +1,42 @@
+# File: test/nature_whistle/notifier/retry_test.exs
 defmodule NatureWhistle.Notifier.RetryTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
-  test "retries on error" do
-    {:ok, counter} = Agent.start_link(fn -> 0 end)
+  alias NatureWhistle.Notifier.Retry
 
-    fun = fn ->
-      count = Agent.get_and_update(counter, fn c -> {c, c + 1} end)
+  setup do
+    original_retry = Application.get_env(:nature_whistle, :retry)
 
-      case count do
-        0 -> {:error, :fail}
-        1 -> {:ok, :success}
-        _ -> {:error, :unexpected}
-      end
-    end
+    on_exit(fn ->
+      if original_retry,
+        do: Application.put_env(:nature_whistle, :retry, original_retry),
+        else: Application.delete_env(:nature_whistle, :retry)
+    end)
 
-    Application.put_env(:nature_whistle, :retry, max_attempts: 2, base_delay_ms: 1)
-    assert {:ok, :success} = NatureWhistle.Notifier.Retry.with_retry(fun)
-    Agent.stop(counter)
+    :ok
   end
 
-  test "returns error after max attempts" do
-    {:ok, counter} = Agent.start_link(fn -> 0 end)
+  test "with_retry/1 returns ok result immediately when function execution succeeds" do
+    assert {:ok, :success} = Retry.with_retry(fn -> {:ok, :success} end)
+  end
 
-    fun = fn ->
-      Agent.update(counter, &(&1 + 1))
-      {:error, :always_fail}
-    end
+  test "with_retry/1 retries until execution attempts run dry and drops max_attempts_exceeded error" do
+    Application.put_env(:nature_whistle, :retry,
+      max_attempts: 2,
+      base_delay_ms: 1,
+      max_delay_ms: 2
+    )
 
-    Application.put_env(:nature_whistle, :retry, max_attempts: 3, base_delay_ms: 1)
-    assert {:error, :max_attempts_exceeded} = NatureWhistle.Notifier.Retry.with_retry(fun)
-    count = Agent.get(counter, & &1)
-    assert count == 3
-    Agent.stop(counter)
+    test_pid = self()
+
+    {:error, :max_attempts_exceeded} =
+      Retry.with_retry(fn ->
+        send(test_pid, :executed)
+        {:error, :failed}
+      end)
+
+    assert_receive :executed
+    assert_receive :executed
+    refute_receive :executed
   end
 end

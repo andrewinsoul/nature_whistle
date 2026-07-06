@@ -1,30 +1,40 @@
 defmodule NatureWhistle.Notifier.Retry do
   @moduledoc """
-  Retry helper for HTTP notifiers.
-  Reads retry configuration from the host's config/config.exs.
+  Exponential backoff helper used by HTTP delivery modules.
 
-  Example config:
-      config :nature_whistle, retry: [
-        max_attempts: 5,
-        base_delay_ms: 1000,
-        max_delay_ms: 30_000
-      ]
+  `Slack`, `Teams`, and `Webhook` all delegate request retries to this module
+  so the retry policy is implemented in one place.
+
+  The retry policy is configured under `:nature_whistle, :retry` and supports:
+
+  - `:max_attempts` - how many total attempts should be made
+  - `:base_delay_ms` - the first wait period before a retry
+  - `:max_delay_ms` - the maximum sleep used when backoff grows
+
+  If the function supplied to `with_retry/1` keeps failing, the helper returns
+  `{:error, :max_attempts_exceeded}` after the final attempt.
   """
 
   @default_max_attempts 3
   @default_base_delay_ms 1000
-  # 30 seconds
   @default_max_delay_ms 30_000
 
   @doc """
-  Executes the given function, retrying on failure up to the configured max attempts.
+  Executes `fun` with retry and exponential backoff.
 
-  The function must return `{:ok, _}` or `{:error, _}`.
+  The callback must return either:
+
+  - `{:ok, value}` to stop retrying and return success immediately
+  - `{:error, reason}` to trigger a retry until the attempt budget is exhausted
+
+  The delay starts at `base_delay_ms`, doubles after each failed attempt, and is
+  capped by `max_delay_ms`.
   """
   def with_retry(fun) do
     max_attempts = max_attempts()
     base_delay = base_delay_ms()
     max_delay = max_delay_ms()
+
     do_retry(fun, max_attempts, base_delay, max_delay)
   end
 
