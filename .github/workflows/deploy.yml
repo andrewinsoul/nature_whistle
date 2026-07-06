@@ -28,7 +28,8 @@ jobs:
             deps
             _build
           key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-
+          restore-keys: |
+            ${{ runner.os }}-mix-
 
       - name: Install dependencies
         run: mix deps.get
@@ -38,12 +39,17 @@ jobs:
 
       - name: Verify tag matches package version
         if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
         run: |
-          VERSION=$(mix run -e "IO.puts(Mix.Project.config()[:version])")
-          TAG=${GITHUB_REF#refs/tags/v}
+          VERSION=$(grep -oP 'version:\s*"\K[^"]+' mix.exs)
+          TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${TAG#v}"
+
+          echo "Package version : $VERSION"
+          echo "Git tag         : $TAG"
 
           if [ "$VERSION" != "$TAG" ]; then
-            echo "Tag ($TAG) does not match mix.exs version ($VERSION)"
+            echo "::error::Tag ($TAG) does not match mix.exs version ($VERSION)"
             exit 1
           fi
 
