@@ -98,7 +98,13 @@ defmodule NatureWhistle.Application do
 
     alerts = Application.get_env(:nature_whistle, :alerts, :default)
 
-    alerts_list = if alerts == :default, do: NatureWhistle.default_alerts(), else: alerts
+    alerts_list =
+      if alerts == :default do
+        NatureWhistle.Packs.Beam.alerts([])
+      else
+        alerts
+      end
+
     alerts_list = alerts_list ++ load_pack_alerts()
 
     alerts_list = Enum.map(alerts_list, &normalize_alert!(&1, schedulers_online))
@@ -446,6 +452,7 @@ defmodule NatureWhistle.Application do
     children = [
       {Task.Supervisor, name: NatureWhistle.TaskSupervisor},
       {NatureWhistle.FailureTracker, []},
+      {NatureWhistle.Packs.Beam.Collector, []},
       {NatureWhistle.BackgroundCleaner, cleaner_opts}
     ]
 

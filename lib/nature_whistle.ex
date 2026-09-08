@@ -23,49 +23,6 @@ defmodule NatureWhistle do
   """
 
   @doc """
-  Returns the built-in sample alert templates shipped with NatureWhistle.
-
-  The returned values are keyword lists rather than maps so they are easy to
-  read in documentation and config examples. They demonstrate the two common
-  alert patterns supported by the library:
-
-  - a memory alert with a high threshold and a console delivery target
-  - a CPU run-queue alert with rate limiting and a sliding window gate
-
-  These values are used as a fallback template source when no custom alerts are
-  present in the application environment. Their `:notifier` field is accepted
-  for compatibility by `NatureWhistle.Application`.
-  """
-  def default_alerts do
-    [
-      [
-        id: :high_memory,
-        event: [:vm, :memory, :total],
-        threshold: 1_073_741_824,
-        alert_message: "⚠️ High memory usage: %{value} MB",
-        calm_message: "✅ Memory usage back to normal: %{value} MB",
-        debounce_ms: 300_000,
-        rate_limit: [
-          window_ms: 60_000,
-          max_events: 10
-        ],
-        notifier: :console
-      ],
-      [
-        id: :high_cpu,
-        event: [:vm, :total_run_queue_lengths, :total],
-        threshold: 4,
-        alert_message: "🚨 High CPU load: run queue length is %{value}",
-        calm_message: "✅ CPU Queue length back to normal: %{value}",
-        debounce_ms: 60_000,
-        rate_limit: [window_ms: 60_000, max_events: 10],
-        sliding_window: [window_ms: 30_000, max_events: 3],
-        notifier: :console
-      ]
-    ]
-  end
-
-  @doc """
   Looks up a single alert definition by `alert_id`.
 
   The lookup first checks the alerts loaded into the running ETS registry,
@@ -105,7 +62,7 @@ defmodule NatureWhistle do
   end
 
   defp config_alert(alert_id) do
-    alerts = Application.get_env(:nature_whistle, :alerts, default_alerts())
+    alerts = Application.get_env(:nature_whistle, :alerts, NatureWhistle.Packs.Beam.alerts([]))
 
     alerts
     |> Enum.map(fn alert ->
@@ -117,6 +74,7 @@ defmodule NatureWhistle do
     end)
     |> Enum.find(fn alert -> Map.get(alert, :id) == alert_id end)
   end
+
   @doc """
   Registers an alert in the currently running NatureWhistle instance.
 
@@ -137,5 +95,4 @@ defmodule NatureWhistle do
       NatureWhistle.Application.unregister_alert(alert_id)
     end
   end
-
 end

@@ -35,6 +35,8 @@ flowchart LR
   B -->|cleanup sweep| R[Prune stale ETS buckets]
   H --> F[FailureTracker]
   F -->|aggregate threshold reached| S
+  Beam[BEAM Pack] --> BC[BEAM Collector]
+  BC -->|Telemetry events| H
 ```
 
 When a telemetry event arrives:
@@ -59,6 +61,8 @@ When a telemetry event arrives:
 - Failure aggregation within configurable time windows
 - Optional rate limiting and sliding-window suppression
 - Custom value formatting for alert messages
+- Built-in BEAM runtime monitoring
+- Configurable BEAM metric thresholds and per-metric disabling
 
 ## Alert Primitives
 
@@ -148,6 +152,14 @@ config :nature_whistle,
     max_attempts: 5,
     base_delay_ms: 1_000,
     max_delay_ms: 60_000
+  ],
+  packs: [
+    {NatureWhistle.Packs.Beam,
+     thresholds: [
+       memory: 1_073_741_824,
+       process_count: 50_000,
+       run_queue: 4
+     ]}
   ],
   notifiers_config: [
     %{name: :console, service: :console, config: %{}},
@@ -319,11 +331,16 @@ These are different concepts:
 
 - `NatureWhistle.Application`
   - creates the ETS tables used for alerts, alert state, rate limiting, and correlation state
-  - loads alert config into ETS
+  - loads alert config and pack-generated alerts into ETS
   - attaches telemetry handlers for configured and runtime alert events
   - starts `NatureWhistle.TaskSupervisor`
   - starts `NatureWhistle.FailureTracker`
+  - starts `NatureWhistle.Packs.Beam.Collector`
   - starts `NatureWhistle.BackgroundCleaner`
+- `NatureWhistle.Packs.Beam.Collector`
+  - periodically samples the configured BEAM runtime metrics
+  - emits the corresponding `[:vm, ...]` telemetry events consumed by the normal alert pipeline
+  - collects only the metrics required by the active BEAM alerts
 - `NatureWhistle.EventHandler`
   - extracts the configured measurement
   - evaluates metric and event conditions
@@ -349,6 +366,55 @@ These are different concepts:
 ## Built-in Packs
 
 NatureWhistle can generate alerts for supported integrations through packs.
+
+### BEAM
+
+The BEAM pack monitors runtime-level signals directly from the Erlang VM.
+
+By default, when `:alerts` is not configured, NatureWhistle loads the built-in BEAM alerts. The pack currently covers:
+
+| Alert | Metric | Default threshold |
+| --- | --- | ---: |
+| `:high_memory` | Total VM memory | `1_073_741_824` bytes |
+| `:high_process_memory` | Process memory | `536_870_912` bytes |
+| `:high_ets_memory` | ETS memory | `268_435_456` bytes |
+| `:high_binary_memory` | Binary memory | `268_435_456` bytes |
+| `:high_process_count` | Process count | `50_000` |
+| `:high_atom_count` | Atom count | `800_000` |
+| `:high_port_count` | Port count | `5_000` |
+| `:high_cpu` | Total run queue | `4` per scheduler |
+
+The total run-queue threshold is scaled by the number of schedulers online, so a configured threshold of `4` becomes `4 × schedulers_online` at runtime.
+
+The BEAM collector is metric-driven: it only samples metrics required by the active BEAM alerts.
+
+#### Configuring BEAM thresholds
+
+Thresholds are configured by metric name. A numeric value overrides the default threshold, while `false` disables that metric.
+
+```elixir
+config :nature_whistle,
+  alerts: [],
+  packs: [
+    {NatureWhistle.Packs.Beam,
+     thresholds: [
+       memory: 2_147_483_648,
+       process_memory: 1_073_741_824,
+       process_count: 100_000,
+       atom_count: false
+     ]}
+  ]
+```
+
+In this example:
+
+- total memory uses a 2 GB threshold
+- process memory uses a 1 GB threshold
+- process count uses a 100,000-process threshold
+- atom-count monitoring is disabled
+- unspecified BEAM metrics keep their defaults
+
+Set `alerts: []` when you want the BEAM pack to be the source of the built-in BEAM alerts with customized thresholds. Pack-generated alert IDs must remain unique across the complete alert configuration.
 
 ### Ecto
 
@@ -387,12 +453,22 @@ Pack-generated alerts use the same alert primitives and notification pipeline as
 
 ## Default Alerts
 
-If you do not define `:alerts`, NatureWhistle ships with two built-in console alerts:
+If you do not define `:alerts`, NatureWhistle loads the built-in BEAM pack alerts using the default thresholds above.
 
-- high memory usage
-- high CPU run-queue length
+These alerts monitor:
 
-The CPU run-queue alert is scaled by the number of schedulers on startup, so it stays proportional to the machine it is running on.
+- total VM memory
+- process memory
+- ETS memory
+- binary memory
+- process count
+- atom count
+- port count
+- total run queue
+
+All built-in BEAM alerts use the console notifier by default. The run-queue threshold is scaled by the number of schedulers online.
+
+If you want to customize or selectively disable the built-in BEAM metrics, configure `NatureWhistle.Packs.Beam` explicitly and set `alerts: []` so the customized pack definitions are used instead of the implicit defaults.
 
 ## Telemetry Example
 
