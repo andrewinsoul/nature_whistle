@@ -42,24 +42,42 @@ defmodule NatureWhistle.IntegrationTest do
         notifier: :console
       }
 
-      :ets.insert(@alerts_table, {[:test, :pipeline], [alert]})
+      :ets.insert(@alerts_table, {alert.event, [alert]})
 
       log =
         capture_log(fn ->
-          EventHandler.handle_event([:test, :pipeline], %{latency: 145}, %{}, %{})
+          EventHandler.handle_event(
+            [:test, :pipeline],
+            %{latency: 145},
+            %{},
+            %{}
+          )
+
           Process.sleep(10)
         end)
 
-      assert [{_id, :breached, expiry}] = :ets.lookup(@state_table, alert.id)
-      assert expiry > System.monotonic_time(:millisecond)
+      alert_id = alert.id
+
+      assert [{^alert_id, :breached, _expiry}] =
+               :ets.lookup(@state_table, alert.id)
 
       assert log =~ "LATENCY BREACH: 145ms"
+
+      capture_log(fn ->
+        EventHandler.handle_event(
+          [:test, :pipeline],
+          %{latency: 50},
+          %{},
+          %{}
+        )
+      end)
 
       assert_eventually(fn ->
         :ets.lookup(@state_table, alert.id) == []
       end)
 
       cleaner_state = :sys.get_state(BackgroundCleaner)
+
       refute Map.has_key?(cleaner_state.timers, alert.id)
     end
 

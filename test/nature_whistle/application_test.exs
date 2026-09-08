@@ -9,6 +9,7 @@ defmodule NatureWhistle.ApplicationTest do
   setup do
     original_alerts = Application.get_env(:nature_whistle, :alerts)
     original_retry = Application.get_env(:nature_whistle, :retry)
+    original_notifiers_config = Application.get_env(:nature_whistle, :notifiers_config)
 
     on_exit(fn ->
       if original_alerts,
@@ -18,6 +19,10 @@ defmodule NatureWhistle.ApplicationTest do
       if original_retry,
         do: Application.put_env(:nature_whistle, :retry, original_retry),
         else: Application.delete_env(:nature_whistle, :retry)
+
+      if original_notifiers_config,
+        do: Application.put_env(:nature_whistle, :notifiers_config, original_notifiers_config),
+        else: Application.delete_env(:nature_whistle, :notifiers_config)
     end)
 
     :ok
@@ -91,4 +96,72 @@ defmodule NatureWhistle.ApplicationTest do
       NatureWhistle.Application.start(:normal, [])
     end
   end
+
+
+  test "register_alert/1 adds a runtime alert and makes it available by id" do
+    alert = %{
+      id: :runtime_alert,
+      event: [:runtime, :alert, :stop],
+      measurement_key: :duration,
+      threshold: 500,
+      notifiers: [:console]
+    }
+
+    assert {:ok, registered} = NatureWhistle.register_alert(alert)
+    assert registered.id == :runtime_alert
+    assert NatureWhistle.get_alert_config(:runtime_alert).id == :runtime_alert
+    assert [{_, [runtime_alert]}] =
+             :ets.lookup(:nature_whistle_alerts, [:runtime, :alert, :stop])
+    assert runtime_alert.id == :runtime_alert
+
+    assert :ok = NatureWhistle.unregister_alert(:runtime_alert)
+    assert NatureWhistle.get_alert_config(:runtime_alert) == nil
+    assert :ets.lookup(:nature_whistle_alerts, [:runtime, :alert, :stop]) == []
+  end
+
+  test "register_alert/1 rejects duplicate alert ids" do
+    alert = %{
+      id: :runtime_duplicate,
+      event: [:runtime, :duplicate],
+      threshold: 1,
+      notifiers: [:console]
+    }
+
+    assert {:ok, _} = NatureWhistle.register_alert(alert)
+    assert {:error, :already_registered} = NatureWhistle.register_alert(alert)
+
+    assert :ok = NatureWhistle.unregister_alert(:runtime_duplicate)
+  end
+
+  test "runtime alerts use configured notifier profiles" do
+    test_pid = self()
+    bypass = Bypass.open()
+
+    Application.put_env(:nature_whistle, :notifiers_config, [
+      %{name: :runtime_slack, service: :slack, config: %{webhook_url: "http://localhost:#{bypass.port}"}}
+    ])
+
+    Bypass.expect_once(bypass, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(test_pid, {:slack_called, Jason.decode!(body)})
+      Plug.Conn.resp(conn, 200, "ok")
+    end)
+
+    alert = %{
+      id: :runtime_slack_alert,
+      event: [:runtime, :slack, :stop],
+      measurement_key: :duration,
+      threshold: 500,
+      alert_message: "Runtime slow: %{value}",
+      notifiers: [:runtime_slack]
+    }
+
+    assert {:ok, _} = NatureWhistle.register_alert(alert)
+
+    :telemetry.execute([:runtime, :slack, :stop], %{duration: 501}, %{})
+
+    assert_receive {:slack_called, %{"text" => "Runtime slow: 501"}}, 500
+    assert :ok = NatureWhistle.unregister_alert(:runtime_slack_alert)
+  end
+
 end

@@ -16,9 +16,9 @@ _Let your system whisper its troubles before they become screams._
 It is designed for simple setup and low runtime overhead:
 
 - telemetry handlers run in the emitting process
-- alert definitions live in application config
+- alert definitions can be loaded from application config or registered at runtime
 - notification delivery happens asynchronously through `Task.Supervisor`
-- alert state and rate-limiting data are tracked in ETS tables
+- alert state, failure aggregation, and rate-limiting data are tracked in ETS tables
 
 ## How It Works
 
@@ -33,25 +33,84 @@ flowchart LR
   S --> B[BackgroundCleaner timer]
   B -->|resolution reached| C2[Calm notification]
   B -->|cleanup sweep| R[Prune stale ETS buckets]
+  H --> F[FailureTracker]
+  F -->|aggregate threshold reached| S
 ```
 
-When an event arrives:
+When a telemetry event arrives:
 
 1. `NatureWhistle.EventHandler` looks up all alerts for that telemetry event.
 2. The measurement value is extracted from the telemetry payload.
 3. `NatureWhistle.EventGuard` applies rate-limit and sliding-window checks.
-4. If the breach is allowed, the alert state is marked as breached and an alert notification is queued.
-5. `NatureWhistle.BackgroundCleaner` later resolves the alert and sends the calm notification once the resolution timer expires.
+4. Aggregate alerts can pass repeated failures through `NatureWhistle.FailureTracker` to determine whether the configured failure threshold has been reached within an aggregation window.
+5. If the breach is actionable, the alert state is marked as breached and an alert notification is queued.
+6. `NatureWhistle.BackgroundCleaner` later resolves the alert and sends the calm notification once the resolution timer expires.
+7. Runtime alerts can be added or removed without restarting the application.
 
 ## Features
 
 - Telemetry-driven alerts for any Elixir or Erlang application
+- Three alert primitives: metric, event, and aggregate
 - Alert and calm notifications
+- Runtime alert registration and unregistration
 - Built-in console, Slack, Teams, and generic webhook notifiers
 - Exponential retry for HTTP delivery
 - ETS-backed state for fast lookup and minimal runtime coupling
+- Failure aggregation within configurable time windows
 - Optional rate limiting and sliding-window suppression
 - Custom value formatting for alert messages
+
+## Alert Primitives
+
+NatureWhistle supports three alert primitives:
+
+### Metric
+
+A metric alert fires when a numeric measurement crosses a configured threshold.
+
+```elixir
+%{
+  id: :api_latency,
+  event: [:my_app, :request, :stop],
+  condition: :metric,
+  measurement_key: :duration,
+  threshold: 500,
+  alert_message: "⚠️ Slow request: %{value}",
+  calm_message: "✅ Request latency recovered: %{value}",
+  notifiers: [:console]
+}
+```
+
+### Event
+
+An event alert reacts to the occurrence of a telemetry event. It is useful when the event itself is the signal rather than a numeric threshold.
+
+```elixir
+%{
+  id: :worker_crashed,
+  event: [:my_app, :worker, :crash],
+  condition: :event,
+  alert_message: "🚨 Worker crash detected",
+  notifiers: [:console]
+}
+```
+
+### Aggregate
+
+An aggregate alert turns repeated failures into an actionable signal. Failures must reach the configured threshold within the aggregation window.
+
+```elixir
+%{
+  id: :repeated_failures,
+  event: [:my_app, :job, :failure],
+  condition: {:aggregate, %{failures: 5, within_ms: 60_000}},
+  alert_message: "🚨 Repeated failures: %{value}",
+  calm_message: "✅ Failure rate recovered",
+  notifiers: [:console]
+}
+```
+
+`NatureWhistle.FailureTracker` is responsible only for determining when repeated failures become significant. Once the aggregate threshold is reached, the result flows through the same normal alert state and notification machinery used by the other alert primitives.
 
 ## 🚀 Installation & Setup
 
@@ -135,25 +194,81 @@ config :nature_whistle,
   ]
 ```
 
+## Runtime Alert Registration
+
+Alerts do not have to be known when the application starts. You can register and unregister alerts while the BEAM is running.
+
+### Register an alert
+
+```elixir
+NatureWhistle.register_alert(%{
+  id: :manual_test_alert,
+  event: [:nature_whistle, :manual_test],
+  condition: :metric,
+  measurement_key: :duration,
+  threshold: 1_000,
+  alert_message: "🚨 Manual test alert: %{value}ms",
+  calm_message: "✅ Manual test alert recovered: %{value}ms",
+  notifiers: [:console]
+})
+```
+
+A successful registration returns:
+
+```elixir
+{:ok, alert}
+```
+
+The alert is immediately available to the runtime alert registry and its telemetry event is wired into the normal NatureWhistle event handling path.
+
+### Unregister an alert
+
+```elixir
+NatureWhistle.unregister_alert(:manual_test_alert)
+```
+
+This removes the alert and its associated runtime state.
+
+Runtime alerts are **ephemeral**. They live in memory and are lost when the BEAM/application restarts. Use application configuration for alerts that should be restored automatically after a restart.
+
+### Runtime registration behavior
+
+- Alert IDs must be unique.
+- Registering an existing alert ID returns `{:error, :already_registered}`.
+- Registration uses the same alert normalization and notification pipeline as configured alerts.
+- Runtime alerts can use the same notifier profiles defined in `notifiers_config`.
+
 ## Alert Reference
 
-| Field             | Required                     | Description                                                                                                                  |
-| ----------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `id`              | Yes                          | Unique alert identifier used for ETS state.                                                                                  |
-| `event`           | Yes                          | Telemetry event name, for example `[:vm, :memory, :total]`.                                                                  |
-| `measurement_key` | No, defaults to `:value`     | Key in the telemetry measurements map that holds the numeric value.                                                          |
-| `threshold`       | Yes                          | Alert triggers when `value >= threshold`.                                                                                    |
-| `alert_message`   | No                           | Message used when the metric crosses the threshold. Supports `%{value}`.                                                     |
-| `calm_message`    | No                           | Message used when the metric returns to normal. Supports `%{value}`.                                                         |
-| `formatter`       | No                           | Optional one-argument function for custom value formatting.                                                                  |
-| `resolution_ms`   | No, defaults to `60_000`     | How long the metric must stay below the threshold before a calm message is sent.                                             |
-| `notifiers`       | No, defaults to `[:console]` | List of notifier profile names to use for this alert.                                                                        |
-| `rate_limit`      | No, defaults to `nil`        | Optional traffic cap that blocks repeated dispatches once `max_events` are seen within `window_ms`.                          |
-| `sliding_window`  | No, defaults to `nil`        | Optional breach-density gate that counts recent breaches in rolling buckets and suppresses alerting once the cap is reached. |
+| Field | Required | Description |
+| --- | --- | --- |
+| `id` | Yes | Unique alert identifier used for ETS state and runtime registration. |
+| `event` | Yes | Telemetry event name, for example `[:vm, :memory, :total]`. |
+| `condition` | No, defaults to `:metric` | Alert primitive: `:metric`, `:event`, or aggregate configuration. |
+| `measurement_key` | No, defaults to `:value` | Key in the telemetry measurements map that holds the numeric value. |
+| `threshold` | Depends on condition | Threshold/value used by the alert condition. |
+| `alert_message` | No | Message used when the alert becomes actionable. Supports `%{value}`. |
+| `calm_message` | No | Message used when the alert returns to normal. Supports `%{value}`. |
+| `formatter` | No | Optional one-argument function for custom value formatting. |
+| `resolution_ms` | No, defaults to `60_000` | How long the active alert remains in its breached lifecycle before recovery. |
+| `notifiers` | No, defaults to `[:console]` | List of notifier profile names to use for this alert. |
+| `rate_limit` | No, defaults to `nil` | Optional traffic cap that blocks repeated dispatches within `window_ms`. |
+| `sliding_window` | No, defaults to `nil` | Optional breach-density gate for recent breaches. |
+| `aggregate` | No | Aggregation settings used by aggregate alerts. |
+| `correlation` | No | Correlation configuration for alerts that depend on related telemetry events. |
 
 ### Important note on timing
 
 The current runtime uses `resolution_ms` as the active alert lifecycle timer. The alert remains in a breached state until that timer expires or is extended by another breach. `debounce_ms` is stored in the loaded alert config, but it is not part of the active runtime decision path yet.
+
+### Aggregation window vs notification window
+
+These are different concepts:
+
+- The **aggregation window** determines how many failures must occur within a period before an aggregate alert becomes actionable.
+- The **notification sliding window** controls how frequently notifications are allowed after a signal has been detected.
+
+`NatureWhistle.FailureTracker` tracks aggregation state independently for each alert ID and failure key.
 
 ## Notifier Profiles
 
@@ -203,25 +318,72 @@ The current runtime uses `resolution_ms` as the active alert lifecycle timer. Th
 ## Built-in Behavior
 
 - `NatureWhistle.Application`
-  - creates the ETS tables `:nature_whistle_alerts`, `:nature_whistle_alert_state`, and `:nature_whistle_rate_limit`
+  - creates the ETS tables used for alerts, alert state, rate limiting, and correlation state
   - loads alert config into ETS
-  - attaches telemetry handlers for each configured event
+  - attaches telemetry handlers for configured and runtime alert events
   - starts `NatureWhistle.TaskSupervisor`
+  - starts `NatureWhistle.FailureTracker`
   - starts `NatureWhistle.BackgroundCleaner`
 - `NatureWhistle.EventHandler`
   - extracts the configured measurement
+  - evaluates metric and event conditions
+  - delegates aggregate counting to `NatureWhistle.FailureTracker`
   - checks rate limits and sliding windows
   - starts or extends the resolution timer
   - queues alert notifications
+- `NatureWhistle.FailureTracker`
+  - tracks repeated failures within aggregation windows
+  - keeps aggregation state independent by alert ID and failure key
+  - reports threshold transitions such as `:below_threshold`, `:triggered`, and `:active`
+  - sweeps expired active windows so recovery can be detected without another telemetry event
 - `NatureWhistle.BackgroundCleaner`
   - sends calm notifications when resolution timers expire
-  - prunes stale rate-limit and sliding-window buckets on sweep
+  - prunes stale rate-limit and sliding-window buckets
 - `NatureWhistle.Notification`
   - formats values
   - expands `%{value}` in messages
   - dispatches to the chosen notifier profile asynchronously
 - `NatureWhistle.Notifier.Retry`
   - retries failed HTTP requests with exponential backoff
+
+## Built-in Packs
+
+NatureWhistle can generate alerts for supported integrations through packs.
+
+### Ecto
+
+The Ecto pack can generate alerts for slow database operations based on Ecto telemetry measurements, including:
+
+- total query time
+- queue time
+- database execution time
+- decode time
+- encode time
+
+Thresholds are configured in milliseconds, and individual metrics can be disabled with `false`. This lets you use a pack while keeping only the alerts that matter to your application.
+
+For example, you can disable `slow_queue` while keeping the other Ecto alerts:
+
+```elixir
+config :nature_whistle,
+  packs: [
+    {NatureWhistle.Packs.Ecto,
+     repo: MyApp.Repo,
+     thresholds: [
+       slow_query: 1_000,
+       slow_queue: false,
+       slow_db_execution: 500
+     ]}
+  ]
+```
+
+Set any supported alert threshold to `false` to disable that alert from the pack.
+
+### Oban
+
+The Oban pack provides alert definitions for Oban-related operational signals, including repeated job failures and slow jobs/queues where configured.
+
+Pack-generated alerts use the same alert primitives and notification pipeline as manually configured alerts.
 
 ## Default Alerts
 

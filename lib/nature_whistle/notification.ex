@@ -100,6 +100,36 @@ defmodule NatureWhistle.Notification do
     ]
   end
 
+  defp format_message(alert, value, metadata, template) do
+    formatted_value = format_value(alert, value)
+
+    message =
+      String.replace(
+        template,
+        "%{value}",
+        formatted_value
+      )
+
+    case Map.get(alert, :message_formatter) do
+      formatter when is_function(formatter, 1) ->
+        metadata_values = formatter.(metadata)
+        interpolate_message(message, metadata_values)
+
+      _ ->
+        message
+    end
+  end
+
+  defp interpolate_message(message, values) do
+    Enum.reduce(values, message, fn {key, value}, message ->
+      String.replace(
+        message,
+        "%{#{key}}",
+        to_string(value)
+      )
+    end)
+  end
+
   @doc """
   Formats and dispatches a notification for the given alert.
 
@@ -124,8 +154,7 @@ defmodule NatureWhistle.Notification do
   """
   def send_notification(alert, value, metadata, type) do
     message_template = if type == :alert, do: alert.alert_message, else: alert.calm_message
-    formatted_value = format_value(alert, value)
-    message = String.replace(message_template, "%{value}", formatted_value)
+    message = format_message(alert, value, metadata, message_template)
 
     notifiers_config =
       Application.get_env(:nature_whistle, :notifiers_config, default_notifiers())

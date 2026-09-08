@@ -62,6 +62,17 @@ defmodule NatureWhistle.BackgroundCleaner do
     GenServer.cast(__MODULE__, {:extend_debounce, alert_id, resolution_ms, value, metadata})
   end
 
+  def start_recovery(alert_id, resolution_ms, value, metadata) do
+    GenServer.cast(
+      __MODULE__,
+      {:start_recovery, alert_id, resolution_ms, value, metadata}
+    )
+  end
+
+  def cancel_recovery(alert_id) do
+    GenServer.cast(__MODULE__, {:cancel_recovery, alert_id})
+  end
+
   @impl true
   def init(opts) do
     sweep_interval = Keyword.get(opts, :sweep_interval_ms, @default_sweep_interval_ms)
@@ -99,6 +110,47 @@ defmodule NatureWhistle.BackgroundCleaner do
       })
 
     {:noreply, %{state | timers: new_timers}}
+  end
+
+  @impl true
+  def handle_cast(
+        {:start_recovery, alert_id, resolution_ms, value, metadata},
+        state
+      ) do
+    case Map.get(state.timers, alert_id) do
+      nil ->
+        ref =
+          Process.send_after(
+            self(),
+            {:resolve_alert, alert_id},
+            resolution_ms
+          )
+
+        timers =
+          Map.put(state.timers, alert_id, %{
+            ref: ref,
+            value: value,
+            metadata: metadata
+          })
+
+        {:noreply, %{state | timers: timers}}
+
+      _timer ->
+        # Recovery is already in progress.
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_cast({:cancel_recovery, alert_id}, state) do
+    case Map.pop(state.timers, alert_id) do
+      {nil, _timers} ->
+        {:noreply, state}
+
+      {%{ref: ref}, timers} ->
+        Process.cancel_timer(ref)
+        {:noreply, %{state | timers: timers}}
+    end
   end
 
   @impl true
