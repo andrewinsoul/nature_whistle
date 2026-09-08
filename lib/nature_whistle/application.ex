@@ -119,6 +119,15 @@ defmodule NatureWhistle.Application do
     for {event, alert_list} <- alerts_by_event do
       :ets.insert(:nature_whistle_alerts, {event, alert_list})
     end
+
+    beam_metrics =
+      alerts_list
+      |> Enum.filter(fn alert ->
+        match?([:vm | _], alert.event)
+      end)
+      |> NatureWhistle.Packs.Beam.metrics()
+
+    beam_metrics
   end
 
   @doc """
@@ -437,7 +446,7 @@ defmodule NatureWhistle.Application do
   def start(_type, _args) do
     schedulers_online = System.schedulers_online()
     create_ets_tables()
-    load_config_into_ets(schedulers_online)
+    beam_metrics = load_config_into_ets(schedulers_online)
     attach_handlers()
 
     sweep_interval = Application.get_env(:nature_whistle, :background_sweep_interval_ms, 10_000)
@@ -456,6 +465,11 @@ defmodule NatureWhistle.Application do
       {NatureWhistle.BackgroundCleaner, cleaner_opts}
     ]
 
-    Supervisor.start_link(children, strategy: :one_for_one, name: NatureWhistle.Supervisor)
+    {:ok, pid} =
+      Supervisor.start_link(children, strategy: :one_for_one, name: NatureWhistle.Supervisor)
+
+    NatureWhistle.Packs.Beam.Collector.configure(beam_metrics)
+
+    {:ok, pid}
   end
 end

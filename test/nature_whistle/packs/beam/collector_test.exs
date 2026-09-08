@@ -17,7 +17,17 @@ defmodule NatureWhistle.Packs.Beam.CollectorTest do
     state = :sys.get_state(Collector)
 
     assert state.interval_ms == 5_000
-    assert state.metrics == []
+
+    assert state.metrics == [
+             :memory,
+             :run_queue,
+             :process_memory,
+             :ets_memory,
+             :binary_memory,
+             :process_count,
+             :atom_count,
+             :port_count
+           ]
   end
 
   test "configures the metrics to collect" do
