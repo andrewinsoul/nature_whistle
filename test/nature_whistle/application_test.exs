@@ -97,7 +97,6 @@ defmodule NatureWhistle.ApplicationTest do
     end
   end
 
-
   test "register_alert/1 adds a runtime alert and makes it available by id" do
     alert = %{
       id: :runtime_alert,
@@ -110,8 +109,10 @@ defmodule NatureWhistle.ApplicationTest do
     assert {:ok, registered} = NatureWhistle.register_alert(alert)
     assert registered.id == :runtime_alert
     assert NatureWhistle.get_alert_config(:runtime_alert).id == :runtime_alert
+
     assert [{_, [runtime_alert]}] =
              :ets.lookup(:nature_whistle_alerts, [:runtime, :alert, :stop])
+
     assert runtime_alert.id == :runtime_alert
 
     assert :ok = NatureWhistle.unregister_alert(:runtime_alert)
@@ -138,7 +139,11 @@ defmodule NatureWhistle.ApplicationTest do
     bypass = Bypass.open()
 
     Application.put_env(:nature_whistle, :notifiers_config, [
-      %{name: :runtime_slack, service: :slack, config: %{webhook_url: "http://localhost:#{bypass.port}"}}
+      %{
+        name: :runtime_slack,
+        service: :slack,
+        config: %{webhook_url: "http://localhost:#{bypass.port}"}
+      }
     ])
 
     Bypass.expect_once(bypass, fn conn ->
@@ -163,5 +168,4 @@ defmodule NatureWhistle.ApplicationTest do
     assert_receive {:slack_called, %{"text" => "Runtime slow: 501"}}, 500
     assert :ok = NatureWhistle.unregister_alert(:runtime_slack_alert)
   end
-
 end
