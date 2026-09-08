@@ -327,6 +327,26 @@ These are different concepts:
 }
 ```
 
+## Public API
+
+The main runtime API is intentionally small:
+
+- `NatureWhistle.get_alert_config/1` looks up a normalized alert definition.
+- `NatureWhistle.register_alert/1` registers an ephemeral runtime alert.
+- `NatureWhistle.unregister_alert/1` removes a runtime alert and its associated state.
+- `NatureWhistle.Application` owns application startup, configuration loading, and runtime alert registration.
+- `NatureWhistle.EventHandler.handle_event/4` is the telemetry callback used by configured events.
+- `NatureWhistle.EventGuard` exposes the rate-limit and sliding-window gates used by the alert pipeline.
+- `NatureWhistle.FailureTracker` exposes failure aggregation for repeated-failure alerts.
+- `NatureWhistle.BackgroundCleaner` manages resolution timers and ETS cleanup.
+- `NatureWhistle.Notification.send_notification/4` formats and asynchronously dispatches notifications.
+- `NatureWhistle.Packs.Beam` exposes BEAM metric collection, alert generation, and metric derivation.
+- `NatureWhistle.Packs.Beam.Collector` runs periodic BEAM metric collection.
+- `NatureWhistle.Packs.Ecto.alerts/1` and `NatureWhistle.Packs.Oban.alerts/1` generate integration-specific alert definitions.
+- `NatureWhistle.Notifier.*` modules implement the built-in delivery backends, while `NatureWhistle.Notifier.Behaviour` defines the notifier contract.
+
+The HexDocs module pages are the authoritative API-level reference for these functions and their configuration options.
+
 ## Built-in Behavior
 
 - `NatureWhistle.Application`

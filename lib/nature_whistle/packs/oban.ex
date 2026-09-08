@@ -13,6 +13,19 @@ defmodule NatureWhistle.Packs.Oban do
   ]
 
   @impl true
+  @doc """
+  Builds Oban alert definitions from the supplied pack options.
+
+  Supported options include:
+
+  - `:thresholds` - keyword list for `:slow_job` and `:slow_queue`; values are
+    milliseconds and `false` disables the corresponding alert
+  - `:failure_detection` - enables repeated job-failure aggregation when set
+    to a keyword list; `:failures` defaults to `10` and `:within_ms` defaults to
+    `300_000`
+
+  The pack also includes an event alert for job exceptions.
+  """
   def alerts(opts) do
     thresholds = Keyword.get(opts, :thresholds, [])
 

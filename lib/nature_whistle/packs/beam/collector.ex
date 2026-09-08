@@ -3,6 +3,16 @@ defmodule NatureWhistle.Packs.Beam.Collector do
 
   @default_interval_ms 5_000
 
+  @doc """
+  Starts the supervised BEAM metric collector.
+
+  Supported options:
+
+  - `:interval_ms` - collection interval in milliseconds; defaults to `5_000`
+  - `:metrics` - initial list of BEAM metrics to collect; defaults to `[]`
+
+  The collector is normally started by `NatureWhistle.Application`.
+  """
   def start_link(opts \\ []) do
     interval_ms = Keyword.get(opts, :interval_ms, @default_interval_ms)
     metrics = Keyword.get(opts, :metrics, [])
@@ -14,6 +24,13 @@ defmodule NatureWhistle.Packs.Beam.Collector do
     )
   end
 
+  @doc """
+  Replaces the set of BEAM metrics collected by the running collector.
+
+  The list should contain metric identifiers supported by
+  `NatureWhistle.Packs.Beam.collect/1`. Returns `:ok` after the collector state
+  has been updated.
+  """
   def configure(metrics) when is_list(metrics) do
     GenServer.call(__MODULE__, {:configure, metrics})
   end

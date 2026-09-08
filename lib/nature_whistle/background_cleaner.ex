@@ -62,6 +62,13 @@ defmodule NatureWhistle.BackgroundCleaner do
     GenServer.cast(__MODULE__, {:extend_debounce, alert_id, resolution_ms, value, metadata})
   end
 
+  @doc """
+  Starts a recovery timer for an alert that has returned below its threshold.
+
+  If a recovery timer is already active for the alert, the existing timer is
+  kept. This prevents repeated healthy telemetry events from repeatedly
+  rescheduling the same recovery.
+  """
   def start_recovery(alert_id, resolution_ms, value, metadata) do
     GenServer.cast(
       __MODULE__,
@@ -69,6 +76,9 @@ defmodule NatureWhistle.BackgroundCleaner do
     )
   end
 
+  @doc """
+  Cancels the pending recovery timer for an alert, if one exists.
+  """
   def cancel_recovery(alert_id) do
     GenServer.cast(__MODULE__, {:cancel_recovery, alert_id})
   end

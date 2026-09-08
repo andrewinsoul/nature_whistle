@@ -10,6 +10,21 @@ defmodule NatureWhistle.Packs.Ecto do
   ]
 
   @impl true
+  @doc """
+  Builds Ecto alert definitions for the configured repository.
+
+  Required option:
+
+  - `:repo` - the Ecto repository module whose telemetry configuration is used
+
+  Optional option:
+
+  - `:thresholds` - keyword list keyed by alert name, with thresholds in
+    milliseconds; use `false` to disable an alert
+
+  The generated thresholds are converted from milliseconds to the native
+  time unit used by Ecto telemetry measurements.
+  """
   def alerts(opts) do
     repo = Keyword.fetch!(opts, :repo)
     repo_config = repo.config()

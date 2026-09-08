@@ -12,10 +12,27 @@ defmodule NatureWhistle.Packs.Beam do
     :run_queue
   ]
 
+  @doc """
+  Collects all BEAM metrics supported by the pack and emits their telemetry events.
+
+  This is the convenience form used when all built-in BEAM metrics are desired.
+  For the supervised collector, prefer `collect/1` so only the metrics required
+  by active alerts are sampled.
+  """
   def collect() do
     collect(@metrics)
   end
 
+  @doc """
+  Collects the requested BEAM runtime metrics and emits `:telemetry` events.
+
+  Supported metric identifiers are `:memory`, `:process_memory`, `:ets_memory`,
+  `:binary_memory`, `:process_count`, `:atom_count`, `:port_count`, and
+  `:run_queue`.
+
+  The emitted events use the `[:vm, ...]` event namespace consumed by the normal
+  NatureWhistle alert pipeline. The function returns `:ok`.
+  """
   def collect(metrics) do
     memory = :erlang.memory()
 
@@ -87,6 +104,17 @@ defmodule NatureWhistle.Packs.Beam do
   end
 
   @impl true
+  @doc """
+  Builds the built-in BEAM alert definitions.
+
+  The optional `:thresholds` keyword list is keyed by metric name. A numeric
+  value overrides that metric's default threshold, `false` disables the metric's
+  alert, and an omitted metric keeps its default.
+
+  The supported threshold keys are `:memory`, `:process_memory`, `:ets_memory`,
+  `:binary_memory`, `:process_count`, `:atom_count`, `:port_count`, and
+  `:run_queue`.
+  """
   def alerts(opts) do
     thresholds =
       opts
@@ -198,6 +226,13 @@ defmodule NatureWhistle.Packs.Beam do
     end
   end
 
+  @doc """
+  Returns the BEAM metric identifiers required by a list of alert definitions.
+
+  Metrics are derived from each alert's `[:vm, ...]` event and de-duplicated.
+  The result is used by `NatureWhistle.Packs.Beam.Collector` so the runtime only
+  samples metrics needed by active BEAM alerts.
+  """
   def metrics(alerts) do
     Enum.map(alerts, &metric_for_event(&1.event))
     |> Enum.uniq()

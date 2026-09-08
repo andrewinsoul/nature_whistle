@@ -11,6 +11,10 @@ defmodule NatureWhistle.Application do
   - it attaches a telemetry handler for each unique configured or runtime-registered event and tracks those handlers in ETS.
   - it starts the `NatureWhistle.TaskSupervisor` used for asynchronous
     notification delivery
+  - it starts `NatureWhistle.FailureTracker`, which aggregates repeated
+    failures for aggregate alerts
+  - it starts `NatureWhistle.Packs.Beam.Collector`, which periodically emits
+    telemetry measurements for the BEAM metrics required by active BEAM alerts
   - it starts `NatureWhistle.BackgroundCleaner`, which resolves alert timers
     and prunes old rate-limit data
 
@@ -89,6 +93,12 @@ defmodule NatureWhistle.Application do
   The normalized alerts are grouped by telemetry event and written into the
   `:nature_whistle_alerts` table. Existing table contents are cleared first so
   the result reflects the current application configuration exactly.
+
+  ## Returns
+
+  Returns the list of BEAM metric identifiers required by the configured BEAM
+  alerts. The application uses this list to configure
+  `NatureWhistle.Packs.Beam.Collector` after the supervision tree starts.
   """
   def load_config_into_ets(schedulers_online) do
     :ets.delete_all_objects(:nature_whistle_alerts)
@@ -135,6 +145,8 @@ defmodule NatureWhistle.Application do
 
   Runtime alerts are kept in ETS and are therefore intentionally ephemeral:
   they are available immediately but are not persisted across a BEAM restart.
+
+  See `NatureWhistle.register_alert/1` for the public convenience API.
   """
   def register_alert(alert) when is_map(alert) or is_list(alert) do
     if :ets.whereis(:nature_whistle_alerts) == :undefined do
@@ -166,6 +178,11 @@ defmodule NatureWhistle.Application do
 
   @doc """
   Removes an alert from the running NatureWhistle instance.
+
+  See `NatureWhistle.unregister_alert/1` for the public convenience API.
+
+  Returns `:ok` when the alert exists and is removed, or
+  `{:error, :not_found}` when no matching alert is registered.
   """
   def unregister_alert(alert_id) do
     case remove_alert_from_ets(alert_id) do
@@ -438,7 +455,9 @@ defmodule NatureWhistle.Application do
   2. load alert definitions from application config into ETS
   3. attach one telemetry handler per configured event
   4. validate retry settings
-  5. start the task supervisor and background cleaner
+  5. start the supervision tree, including the task supervisor, failure tracker,
+     BEAM collector, and background cleaner
+  6. configure the BEAM collector with the metrics required by active BEAM alerts
 
   The function returns the result of the internal supervisor start-up.
   """

@@ -151,6 +151,9 @@ defmodule NatureWhistle.Notification do
   - spawns an asynchronous task for each matching built-in notifier service
 
   If no notifier profile matches, nothing is dispatched and a warning is logged.
+
+  Delivery is asynchronous. The function returns after delivery tasks have been
+  queued; it does not wait for the remote notifier request to complete.
   """
   def send_notification(alert, value, metadata, type) do
     message_template = if type == :alert, do: alert.alert_message, else: alert.calm_message

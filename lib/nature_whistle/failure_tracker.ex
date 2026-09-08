@@ -23,6 +23,9 @@ defmodule NatureWhistle.FailureTracker do
 
   @doc """
   Starts the shared failure tracker.
+
+  Options include `:name` to override the registered process name and
+  `:sweep_interval_ms` to control automatic cleanup of expired failure windows.
   """
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
@@ -35,6 +38,12 @@ defmodule NatureWhistle.FailureTracker do
 
   The aggregate is isolated by `alert_id` and `key`, allowing multiple packs
   and multiple aggregate rules to use the same tracker independently.
+
+  ## Returns
+
+  - `{:below_threshold, count}` when the current count is below the threshold
+  - `{:triggered, count}` when the threshold has just been crossed
+  - `{:active, count}` when the threshold was already crossed previously
   """
   def record_failure(
         alert_id,
@@ -53,13 +62,22 @@ defmodule NatureWhistle.FailureTracker do
 
   @doc """
   Manually sweeps expired failure windows.
+
+  The optional `timestamp` argument is a monotonic timestamp in milliseconds,
+  which is useful when deterministic cleanup is needed in tests or diagnostics.
+
+  Returns a list of `{alert_id, failure_key}` entries whose active windows
+  recovered during the sweep.
   """
   def sweep(timestamp \\ System.monotonic_time(:millisecond)) do
     GenServer.call(__MODULE__, {:sweep, timestamp})
   end
 
   @doc """
-  Clears all tracked failure windows. Primarily useful for tests.
+  Clears all tracked failure windows.
+
+  Returns `:ok`. This is primarily useful for tests and operational reset
+  scenarios where aggregate history should be discarded.
   """
   def reset do
     GenServer.call(__MODULE__, :reset)

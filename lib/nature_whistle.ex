@@ -78,6 +78,20 @@ defmodule NatureWhistle do
   @doc """
   Registers an alert in the currently running NatureWhistle instance.
 
+  The alert may be supplied as a map or keyword list. It is normalized using
+  the same rules as alerts loaded from application configuration.
+
+  ## Returns
+
+  - `{:ok, alert}` when the alert is registered successfully
+  - `{:error, :not_started}` when the NatureWhistle ETS registry is unavailable
+  - `{:error, :already_registered}` when another alert already uses the ID
+  - `{:error, :invalid_alert}` when the argument is neither a map nor a keyword list
+
+  Runtime registrations are ephemeral and are not persisted across a BEAM
+  restart. The alert's telemetry event is attached immediately so subsequent
+  events follow the normal NatureWhistle processing pipeline.
+
   Runtime registrations are ephemeral and are not persisted across a BEAM
   restart. The alert uses the same notification pipeline as configured alerts.
   """
@@ -87,6 +101,15 @@ defmodule NatureWhistle do
 
   @doc """
   Removes a runtime alert from the currently running NatureWhistle instance.
+
+  Removing an alert also removes its alert state, rate-limit state, sliding-window
+  state, and correlation state, and synchronizes the telemetry handlers.
+
+  ## Returns
+
+  - `:ok` when the alert was removed
+  - `{:error, :not_started}` when NatureWhistle is not running
+  - `{:error, :not_found}` when no alert with `alert_id` exists
   """
   def unregister_alert(alert_id) do
     if :ets.whereis(:nature_whistle_alerts) == :undefined do
