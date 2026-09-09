@@ -23,55 +23,12 @@ defmodule NatureWhistle do
   """
 
   @doc """
-  Returns the built-in sample alert templates shipped with NatureWhistle.
-
-  The returned values are keyword lists rather than maps so they are easy to
-  read in documentation and config examples. They demonstrate the two common
-  alert patterns supported by the library:
-
-  - a memory alert with a high threshold and a console delivery target
-  - a CPU run-queue alert with rate limiting and a sliding window gate
-
-  These values are used as a fallback template source when no custom alerts are
-  present in the application environment. Their `:notifier` field is accepted
-  for compatibility by `NatureWhistle.Application`.
-  """
-  def default_alerts do
-    [
-      [
-        id: :high_memory,
-        event: [:vm, :memory, :total],
-        threshold: 1_073_741_824,
-        alert_message: "⚠️ High memory usage: %{value} MB",
-        calm_message: "✅ Memory usage back to normal: %{value} MB",
-        debounce_ms: 300_000,
-        rate_limit: [
-          window_ms: 60_000,
-          max_events: 10
-        ],
-        notifier: :console
-      ],
-      [
-        id: :high_cpu,
-        event: [:vm, :total_run_queue_lengths, :total],
-        threshold: 4,
-        alert_message: "🚨 High CPU load: run queue length is %{value}",
-        calm_message: "✅ CPU Queue length back to normal: %{value}",
-        debounce_ms: 60_000,
-        rate_limit: [window_ms: 60_000, max_events: 10],
-        sliding_window: [window_ms: 30_000, max_events: 3],
-        notifier: :console
-      ]
-    ]
-  end
-
-  @doc """
   Looks up a single alert definition by `alert_id`.
 
-  The lookup is performed against `:nature_whistle, :alerts` in application
-  configuration. If that key is not set, the function falls back to
-  [`default_alerts/0`](#default_alerts/0) and converts the sample definitions
-  into maps before searching.
+  The lookup first checks the alerts loaded into the running ETS registry,
+  which includes runtime-registered alerts. If the registry is not available,
+  or the alert is not present there, it falls back to application configuration
+  and the built-in defaults.
 
   Both keyword lists and maps are accepted in the configuration source. The
   helper normalizes each alert into a map so callers can rely on dot access
@@ -83,17 +40,82 @@ defmodule NatureWhistle do
   - returns `nil` when no alert with the requested ID exists
   """
   def get_alert_config(alert_id) do
-    alerts = Application.get_env(:nature_whistle, :alerts, default_alerts())
+    case :ets.whereis(:nature_whistle_alerts) do
+      :undefined ->
+        config_alert(alert_id)
 
-    alerts =
-      Enum.map(alerts, fn alert ->
-        cond do
-          is_list(alert) -> Map.new(alert)
-          is_map(alert) -> alert
-          true -> %{}
+      _ ->
+        case :ets.foldl(
+               fn {_event, alerts}, acc ->
+                 case acc do
+                   nil -> Enum.find(alerts, &(&1.id == alert_id))
+                   alert -> alert
+                 end
+               end,
+               nil,
+               :nature_whistle_alerts
+             ) do
+          nil -> config_alert(alert_id)
+          alert -> alert
         end
-      end)
+    end
+  end
 
-    Enum.find(alerts, fn alert -> alert.id == alert_id end)
+  defp config_alert(alert_id) do
+    alerts = Application.get_env(:nature_whistle, :alerts, NatureWhistle.Packs.Beam.alerts([]))
+
+    alerts
+    |> Enum.map(fn alert ->
+      cond do
+        is_list(alert) -> Map.new(alert)
+        is_map(alert) -> alert
+        true -> %{}
+      end
+    end)
+    |> Enum.find(fn alert -> Map.get(alert, :id) == alert_id end)
+  end
+
+  @doc """
+  Registers an alert in the currently running NatureWhistle instance.
+
+  The alert may be supplied as a map or keyword list. It is normalized using
+  the same rules as alerts loaded from application configuration.
+
+  ## Returns
+
+  - `{:ok, alert}` when the alert is registered successfully
+  - `{:error, :not_started}` when the NatureWhistle ETS registry is unavailable
+  - `{:error, :already_registered}` when another alert already uses the ID
+  - `{:error, :invalid_alert}` when the argument is neither a map nor a keyword list
+
+  Runtime registrations are ephemeral and are not persisted across a BEAM
+  restart. The alert's telemetry event is attached immediately so subsequent
+  events follow the normal NatureWhistle processing pipeline.
+
+  Runtime registrations are ephemeral and are not persisted across a BEAM
+  restart. The alert uses the same notification pipeline as configured alerts.
+  """
+  def register_alert(alert) do
+    NatureWhistle.Application.register_alert(alert)
+  end
+
+  @doc """
+  Removes a runtime alert from the currently running NatureWhistle instance.
+
+  Removing an alert also removes its alert state, rate-limit state, sliding-window
+  state, and correlation state, and synchronizes the telemetry handlers.
+
+  ## Returns
+
+  - `:ok` when the alert was removed
+  - `{:error, :not_started}` when NatureWhistle is not running
+  - `{:error, :not_found}` when no alert with `alert_id` exists
+  """
+  def unregister_alert(alert_id) do
+    if :ets.whereis(:nature_whistle_alerts) == :undefined do
+      {:error, :not_started}
+    else
+      NatureWhistle.Application.unregister_alert(alert_id)
+    end
   end
 end

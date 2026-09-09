@@ -23,6 +23,9 @@ defmodule NatureWhistle.EventGuard do
   - `:max_events` - the number of events allowed within that window
 
   When no rate limit is configured, the function always returns `true`.
+
+  The `now` argument is expected to use the same monotonic millisecond time
+  source used by the alert runtime.
   """
   def allow_rate_limit?(alert, now) do
     case Map.get(alert, :rate_limit) do
@@ -50,6 +53,8 @@ defmodule NatureWhistle.EventGuard do
 
   The timestamps are stored newest-first so the cleanup pass can trim old data
   efficiently while still keeping the implementation straightforward.
+
+  The function returns the result of the ETS insertion.
   """
   def record_rate_limit(%{id: id}, now) do
     key = {:rate_limit, id}

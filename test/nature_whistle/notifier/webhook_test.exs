@@ -55,4 +55,37 @@ defmodule NatureWhistle.Notifier.WebhookTest do
     assert {:error, :max_attempts_exceeded} =
              Webhook.deliver("payload", %{}, webhook_url: "http://localhost:#{bypass.port}")
   end
+
+  test "deliver/3 accepts map configuration and uses defaults", %{bypass: bypass} do
+    Bypass.expect_once(bypass, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+      assert conn.method == "POST"
+      assert Jason.decode!(body) == %{"text" => "payload"}
+
+      Plug.Conn.resp(conn, 200, "ok")
+    end)
+
+    assert {:ok, :sent} =
+             Webhook.deliver(
+               "payload",
+               %{},
+               %{webhook_url: "http://localhost:#{bypass.port}"}
+             )
+  end
+
+  test "deliver/3 raises when configuration is invalid" do
+    assert_raise BadMapError, fn ->
+      Webhook.deliver("payload", %{}, :invalid_config)
+    end
+  end
+
+  test "deliver/3 handles transport errors" do
+    assert {:error, :max_attempts_exceeded} =
+             Webhook.deliver(
+               "payload",
+               %{},
+               %{webhook_url: "http://127.0.0.1:1"}
+             )
+  end
 end

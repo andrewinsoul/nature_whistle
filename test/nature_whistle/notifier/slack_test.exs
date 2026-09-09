@@ -36,17 +36,63 @@ defmodule NatureWhistle.Notifier.SlackTest do
     end)
 
     assert {:ok, :sent} =
-             Slack.deliver("Slack Alert!", %{}, %{webhook_url: "http://localhost:#{bypass.port}"})
+             Slack.deliver(
+               "Slack Alert!",
+               %{},
+               %{webhook_url: "http://localhost:#{bypass.port}"}
+             )
   end
 
-  test "deliver/3 returns an error when Slack responds with a failure status", %{
-    bypass: bypass
-  } do
+  test "deliver/3 accepts keyword list configuration", %{bypass: bypass} do
     Bypass.expect_once(bypass, fn conn ->
-      Plug.Conn.resp(conn, 500, "boom")
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+      assert Jason.decode!(body) == %{"text" => "Keyword Alert!"}
+
+      Plug.Conn.resp(conn, 200, "ok")
+    end)
+
+    assert {:ok, :sent} =
+             Slack.deliver(
+               "Keyword Alert!",
+               %{},
+               webhook_url: "http://localhost:#{bypass.port}"
+             )
+  end
+
+  test "deliver/3 handles non-success HTTP responses", %{bypass: bypass} do
+    Bypass.expect_once(bypass, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("text/plain")
+      |> Plug.Conn.resp(500, "kasala bust")
     end)
 
     assert {:error, :max_attempts_exceeded} =
-             Slack.deliver("Slack Alert!", %{}, %{webhook_url: "http://localhost:#{bypass.port}"})
+             Slack.deliver(
+               "Slack Alert!",
+               %{},
+               %{webhook_url: "http://localhost:#{bypass.port}"}
+             )
+  end
+
+  test "deliver/3 handles transport errors" do
+    assert {:error, :max_attempts_exceeded} =
+             Slack.deliver(
+               "Slack Alert!",
+               %{},
+               %{webhook_url: "http://127.0.0.1:1"}
+             )
+  end
+
+  test "deliver/3 raises when webhook_url is missing" do
+    assert_raise KeyError, fn ->
+      Slack.deliver("Slack Alert!", %{}, %{})
+    end
+  end
+
+  test "deliver/3 treats invalid configuration as an empty config" do
+    assert_raise KeyError, fn ->
+      Slack.deliver("Slack Alert!", %{}, :invalid_config)
+    end
   end
 end

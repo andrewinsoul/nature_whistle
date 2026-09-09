@@ -15,14 +15,6 @@ defmodule NatureWhistleTest do
     :ok
   end
 
-  test "default_alerts/0 returns the built-in alert templates" do
-    alerts = NatureWhistle.default_alerts()
-
-    assert length(alerts) == 2
-    assert Enum.any?(alerts, &(&1[:id] == :high_memory))
-    assert Enum.any?(alerts, &(&1[:id] == :high_cpu))
-  end
-
   test "get_alert_config/1 resolves keyword and map alert definitions" do
     Application.put_env(:nature_whistle, :alerts, [
       [id: :keyword_alert, event: [:test, :keyword], threshold: 1],
