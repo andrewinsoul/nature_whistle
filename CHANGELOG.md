@@ -2,13 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.4.0] - 2026-09-09
 
 ### Added
 
+- **Alert Pack architecture** for defining extensible and composable groups of alerts.
+- **BEAM/VM Alert Pack** with monitoring for:
+  - Total memory
+  - Process memory
+  - ETS memory
+  - Binary memory
+  - Process count
+  - Atom count
+  - Port count
+  - Run queue
+- **Ecto Alert Pack** for monitoring slow queries, queue time, database execution time, decode time, and encode time.
+- **Oban Alert Pack** for monitoring slow jobs, queue latency, job exceptions, and repeated job failures.
+- **Runtime alert registration and unregistration** without requiring a server restart.
+- **Automatic Telemetry handler synchronization** for dynamically registered and removed alerts.
 - **Stateful Incident Tracking** to manage the complete lifecycle of an alert, from initial trigger through recovery.
-- **Alert Simulation** for validating alert rules, notification delivery, and formatter behavior without waiting for real production events.
 - **Rich Alert Context** to include additional information such as threshold values, duration, environment, node, and custom metadata in notifications.
+- **Alert Simulation** for validating alert rules, notification delivery, and formatter behavior without waiting for real production events.
+- **BEAM metrics collector** for periodically collecting only the VM metrics required by configured BEAM alerts.
+- **Runtime failure tracking** for aggregate failure detection and incident state management.
+
+### Changed
+
+- BEAM run-queue thresholds are normalized relative to the number of schedulers available on the system.
+- Alert handlers are synchronized dynamically as alerts are added or removed at runtime.
+- BEAM metric collection is driven by the metrics required by configured alerts.
+- Alert configuration now supports disabling individual built-in alerts and overriding their default thresholds.
+
+### Fixed
+
+- Fixed BEAM collector startup ordering so configured metrics are applied only after the collector has been started.
+- Fixed telemetry handler lifecycle management when runtime alerts are registered or removed.
 
 ---
 
