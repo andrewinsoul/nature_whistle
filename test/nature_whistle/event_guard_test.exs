@@ -27,8 +27,12 @@ defmodule NatureWhistle.EventGuardTest do
     refute EventGuard.allow_rate_limit?(alert, 10_000)
   end
 
+  test "allow_rate_limit?/2 allows events when rate_limit is nil" do
+    assert EventGuard.allow_rate_limit?(%{id: :cpu_alert, rate_limit: nil}, 10_000)
+  end
+
   test "record_rate_limit/2 prepends timestamps into the ETS bucket" do
-    alert = %{id: :cpu_alert}
+    alert = %{id: :cpu_alert, rate_limit: [window_ms: 1_000, max_events: 2]}
 
     EventGuard.record_rate_limit(alert, 10_000)
     EventGuard.record_rate_limit(alert, 10_250)
@@ -36,6 +40,18 @@ defmodule NatureWhistle.EventGuardTest do
     assert :ets.lookup(@table, {:rate_limit, :cpu_alert}) == [
              {{:rate_limit, :cpu_alert}, [10_250, 10_000]}
            ]
+  end
+
+  test "record_rate_limit/2 does nothing when rate_limit is nil" do
+    EventGuard.record_rate_limit(%{id: :cpu_alert, rate_limit: nil}, 10_000)
+
+    assert :ets.lookup(@table, {:rate_limit, :cpu_alert}) == []
+  end
+
+  test "record_rate_limit/2 does nothing when rate_limit is omitted" do
+    EventGuard.record_rate_limit(%{id: :cpu_alert}, 10_000)
+
+    assert :ets.lookup(@table, {:rate_limit, :cpu_alert}) == []
   end
 
   test "allow_sliding_window?/2 respects the rolling bucket count" do
@@ -51,8 +67,12 @@ defmodule NatureWhistle.EventGuardTest do
            )
   end
 
+  test "allow_sliding_window?/2 does not block when sliding_window is nil" do
+    refute EventGuard.allow_sliding_window?(%{id: :cpu_alert, sliding_window: nil}, 10_000)
+  end
+
   test "record_sliding_window_event/2 increments the current sub-bucket" do
-    alert = %{id: :cpu_alert}
+    alert = %{id: :cpu_alert, sliding_window: [window_ms: 30_000, max_events: 2]}
 
     EventGuard.record_sliding_window_event(alert, 25_123)
     EventGuard.record_sliding_window_event(alert, 25_999)
@@ -60,5 +80,17 @@ defmodule NatureWhistle.EventGuardTest do
     assert :ets.lookup(@table, {{:sliding_window, :cpu_alert}, 20_000}) == [
              {{{:sliding_window, :cpu_alert}, 20_000}, 2}
            ]
+  end
+
+  test "record_sliding_window_event/2 does nothing when sliding_window is nil" do
+    EventGuard.record_sliding_window_event(%{id: :cpu_alert, sliding_window: nil}, 25_123)
+
+    assert :ets.lookup(@table, {{:sliding_window, :cpu_alert}, 20_000}) == []
+  end
+
+  test "record_sliding_window_event/2 does nothing when sliding_window is omitted" do
+    EventGuard.record_sliding_window_event(%{id: :cpu_alert}, 25_123)
+
+    assert :ets.lookup(@table, {{:sliding_window, :cpu_alert}, 20_000}) == []
   end
 end

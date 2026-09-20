@@ -13,8 +13,8 @@ defmodule NatureWhistle.Application do
     notification delivery
   - it starts `NatureWhistle.FailureTracker`, which aggregates repeated
     failures for aggregate alerts
-  - it starts `NatureWhistle.Packs.Beam.Collector`, which periodically emits
-    telemetry measurements for the BEAM metrics required by active BEAM alerts
+  - it starts `NatureWhistle.Packs.Beam.Collector` only when active BEAM alerts
+    require telemetry measurements
   - it starts `NatureWhistle.BackgroundCleaner`, which resolves alert timers
     and prunes old rate-limit data
 
@@ -97,8 +97,8 @@ defmodule NatureWhistle.Application do
   ## Returns
 
   Returns the list of BEAM metric identifiers required by the configured BEAM
-  alerts. The application uses this list to configure
-  `NatureWhistle.Packs.Beam.Collector` after the supervision tree starts.
+  alerts. The application uses this list to start the collector only when
+  active BEAM alerts require collection.
   """
   def load_config_into_ets(schedulers_online) do
     :ets.delete_all_objects(:nature_whistle_alerts)
@@ -172,6 +172,7 @@ defmodule NatureWhistle.Application do
 
       :ets.insert(:nature_whistle_alerts, {alert.event, event_alerts})
       sync_telemetry_handlers()
+      sync_beam_collector()
       {:ok, alert}
     end
   end
@@ -188,6 +189,7 @@ defmodule NatureWhistle.Application do
     case remove_alert_from_ets(alert_id) do
       {:ok, _alert} ->
         sync_telemetry_handlers()
+        sync_beam_collector()
         :ok
 
       :error ->
@@ -428,6 +430,39 @@ defmodule NatureWhistle.Application do
     do:
       "✅ NatureWhistle resolution: %{value} is back below threshold (#{threshold}) for event #{inspect(event)}"
 
+  defp sync_beam_collector do
+    beam_metrics =
+      :ets.tab2list(:nature_whistle_alerts)
+      |> Enum.flat_map(fn {_event, alerts} -> alerts end)
+      |> Enum.filter(&match?([:vm | _], &1.event))
+      |> NatureWhistle.Packs.Beam.metrics()
+
+    interval_ms = Application.get_env(:nature_whistle, :beam_metric_interval_ms, 5_000)
+    collector = NatureWhistle.Packs.Beam.Collector
+    supervisor = NatureWhistle.Supervisor
+
+    case {beam_metrics, Process.whereis(collector)} do
+      {[], nil} ->
+        :ok
+
+      {[], _pid} ->
+        :ok = Supervisor.terminate_child(supervisor, collector)
+        Supervisor.delete_child(supervisor, collector)
+
+      {metrics, nil} ->
+        {:ok, _pid} =
+          Supervisor.start_child(
+            supervisor,
+            {collector, [interval_ms: interval_ms, metrics: metrics]}
+          )
+
+        :ok
+
+      {metrics, _pid} ->
+        collector.configure(metrics)
+    end
+  end
+
   defp validate_retry_config! do
     retry_config = Application.get_env(:nature_whistle, :retry, [])
     base_delay = Keyword.get(retry_config, :base_delay_ms, 1000)
@@ -456,8 +491,8 @@ defmodule NatureWhistle.Application do
   3. attach one telemetry handler per configured event
   4. validate retry settings
   5. start the supervision tree, including the task supervisor, failure tracker,
-     BEAM collector, and background cleaner
-  6. configure the BEAM collector with the metrics required by active BEAM alerts
+     background cleaner, and the BEAM collector when metrics are required
+  6. synchronize the BEAM collector with runtime alert registration and removal
 
   The function returns the result of the internal supervisor start-up.
   """
@@ -470,6 +505,9 @@ defmodule NatureWhistle.Application do
 
     sweep_interval = Application.get_env(:nature_whistle, :background_sweep_interval_ms, 10_000)
 
+    beam_metrics_interval_ms =
+      Application.get_env(:nature_whistle, :beam_metric_interval_ms, 5_000)
+
     cleaner_opts =
       if sweep_interval && is_integer(sweep_interval),
         do: [sweep_interval_ms: sweep_interval],
@@ -477,17 +515,25 @@ defmodule NatureWhistle.Application do
 
     validate_retry_config!()
 
-    children = [
-      {Task.Supervisor, name: NatureWhistle.TaskSupervisor},
-      {NatureWhistle.FailureTracker, []},
-      {NatureWhistle.Packs.Beam.Collector, []},
-      {NatureWhistle.BackgroundCleaner, cleaner_opts}
-    ]
+    beam_collector_children =
+      if beam_metrics == [] do
+        []
+      else
+        [
+          {NatureWhistle.Packs.Beam.Collector,
+           [interval_ms: beam_metrics_interval_ms, metrics: beam_metrics]}
+        ]
+      end
+
+    children =
+      [
+        {Task.Supervisor, name: NatureWhistle.TaskSupervisor},
+        {NatureWhistle.FailureTracker,
+         [recovery_handler: &NatureWhistle.EventHandler.handle_aggregate_recovery/1]}
+      ] ++ beam_collector_children ++ [{NatureWhistle.BackgroundCleaner, cleaner_opts}]
 
     {:ok, pid} =
       Supervisor.start_link(children, strategy: :one_for_one, name: NatureWhistle.Supervisor)
-
-    NatureWhistle.Packs.Beam.Collector.configure(beam_metrics)
 
     {:ok, pid}
   end

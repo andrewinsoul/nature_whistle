@@ -8,7 +8,11 @@ defmodule NatureWhistle.EventGuard do
   - `rate_limit` limits the number of alert dispatches over a time window
   - `sliding_window` counts breach density across fixed-size buckets
 
-  Both helpers read and write to the `:nature_whistle_rate_limit` ETS table.
+  Configured helpers read and write to the `:nature_whistle_rate_limit` ETS
+  table. When a guard is `nil` or omitted, its recording helper is a no-op.
+
+  This keeps disabled guards out of the event-handling path instead of creating
+  unused ETS state.
   """
 
   @table :nature_whistle_rate_limit
@@ -54,9 +58,10 @@ defmodule NatureWhistle.EventGuard do
   The timestamps are stored newest-first so the cleanup pass can trim old data
   efficiently while still keeping the implementation straightforward.
 
-  The function returns the result of the ETS insertion.
+  When no rate limit is configured, the function returns `:ok` without
+  touching ETS. Otherwise it returns the result of the ETS insertion.
   """
-  def record_rate_limit(%{id: id}, now) do
+  def record_rate_limit(%{id: id, rate_limit: config}, now) when is_list(config) do
     key = {:rate_limit, id}
 
     timestamps =
@@ -70,6 +75,8 @@ defmodule NatureWhistle.EventGuard do
       {key, [now | timestamps]}
     )
   end
+
+  def record_rate_limit(_alert, _now), do: :ok
 
   @doc """
   Returns `true` when the alert has already reached its sliding-window cap.
@@ -105,12 +112,19 @@ defmodule NatureWhistle.EventGuard do
   Increments the sliding-window bucket for the alert at the current timestamp.
 
   Buckets are stored in ETS as `{ {:sliding_window, alert_id}, bucket_start_ms }`
-  entries whose counters are incremented atomically.
+  entries whose counters are incremented atomically. When no sliding window is
+  configured, the function returns `:ok` without touching ETS.
   """
-  def record_sliding_window_event(alert, now) do
+  def record_sliding_window_event(
+        %{id: id, sliding_window: config},
+        now
+      )
+      when is_list(config) do
     bucket_timestamp = div(now, @sub_bucket_ms) * @sub_bucket_ms
-    key = {{:sliding_window, alert.id}, bucket_timestamp}
+    key = {{:sliding_window, id}, bucket_timestamp}
 
     :ets.update_counter(@table, key, {2, 1}, {key, 0})
   end
+
+  def record_sliding_window_event(_alert, _now), do: :ok
 end

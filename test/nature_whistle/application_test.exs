@@ -12,20 +12,34 @@ defmodule NatureWhistle.ApplicationTest do
     original_notifiers_config = Application.get_env(:nature_whistle, :notifiers_config)
 
     on_exit(fn ->
-      if original_alerts,
-        do: Application.put_env(:nature_whistle, :alerts, original_alerts),
-        else: Application.delete_env(:nature_whistle, :alerts)
-
-      if original_retry,
-        do: Application.put_env(:nature_whistle, :retry, original_retry),
-        else: Application.delete_env(:nature_whistle, :retry)
-
-      if original_notifiers_config,
-        do: Application.put_env(:nature_whistle, :notifiers_config, original_notifiers_config),
-        else: Application.delete_env(:nature_whistle, :notifiers_config)
+      restore_env(:alerts, original_alerts)
+      restore_env(:retry, original_retry)
+      restore_env(:notifiers_config, original_notifiers_config)
+      restore_alert_runtime(original_alerts)
     end)
 
     :ok
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:nature_whistle, key)
+  defp restore_env(key, value), do: Application.put_env(:nature_whistle, key, value)
+
+  defp restore_alert_runtime(original_alerts) do
+    NatureWhistle.Application.load_config_into_ets(System.schedulers_online())
+
+    metrics =
+      :ets.tab2list(@alerts_table)
+      |> Enum.flat_map(fn {_event, alerts} -> alerts end)
+      |> Enum.filter(&match?([:vm | _], &1.event))
+      |> NatureWhistle.Packs.Beam.metrics()
+
+    if Process.whereis(NatureWhistle.Packs.Beam.Collector) do
+      :ok = NatureWhistle.Packs.Beam.Collector.configure(metrics)
+    end
+
+    if original_alerts == nil do
+      Application.delete_env(:nature_whistle, :alerts)
+    end
   end
 
   test "creates core ETS tables upon start" do
