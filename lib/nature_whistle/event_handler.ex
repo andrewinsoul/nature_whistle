@@ -55,6 +55,37 @@ defmodule NatureWhistle.EventHandler do
     end
   end
 
+  @doc """
+  Resolves an aggregate alert after its failure window expires.
+
+  The `FailureTracker` calls this function after a sweep. An alert is only
+  resolved when no other failure key for the same alert remains active. This
+  prevents one recovered key from clearing an alert that is still active for a
+  different key.
+  """
+  def handle_aggregate_recovery({_alert_id, _failure_key, true}), do: :ok
+
+  def handle_aggregate_recovery({alert_id, failure_key, false}) do
+    case :ets.lookup(@alert_state_table, alert_id) do
+      [{^alert_id, :breached, _expiry}] ->
+        :ets.delete(@alert_state_table, alert_id)
+
+        if alert = NatureWhistle.get_alert_config(alert_id) do
+          send_notification(
+            alert,
+            0,
+            %{aggregate_key: failure_key, recovery_reason: :window_expired},
+            :calm
+          )
+        end
+
+      [] ->
+        :ok
+    end
+  end
+
+  def handle_aggregate_recovery(_recovery), do: :ok
+
   defp handle_correlations(event, metadata) do
     correlations =
       :ets.foldl(
@@ -102,8 +133,34 @@ defmodule NatureWhistle.EventHandler do
   defp handle_correlation(_alert, _metadata), do: :ok
 
   defp check_alert(%{condition: :event} = alert, _measurements, metadata) do
-    handle_breach(alert, alert.event_value, metadata)
+    handle_breach(alert, Map.get(alert, :event_value, 1), metadata)
     record_correlation(alert, metadata)
+  end
+
+  defp check_alert(
+         %{condition: {:aggregate, aggregate}} = alert,
+         _measurements,
+         metadata
+       ) do
+    key = Keyword.fetch!(aggregate, :key).(metadata)
+    failures = Keyword.fetch!(aggregate, :failures)
+    within_ms = Keyword.fetch!(aggregate, :within_ms)
+
+    case NatureWhistle.FailureTracker.record_failure(
+           alert.id,
+           key,
+           failures,
+           within_ms
+         ) do
+      {:triggered, count} ->
+        handle_breach(alert, count, metadata)
+
+      {:below_threshold, _count} ->
+        :ok
+
+      {:active, _count} ->
+        :ok
+    end
   end
 
   defp check_alert(alert, measurements, metadata) do
@@ -138,7 +195,7 @@ defmodule NatureWhistle.EventHandler do
   defp handle_breach(alert, value, metadata) do
     current_time = System.monotonic_time(:millisecond)
 
-    record_sliding_window_event(alert, current_time)
+    record_sliding_window_event_if_configured(alert, current_time)
 
     with true <- allow_rate_limit?(alert, current_time),
          false <- allow_sliding_window?(alert, current_time) do
@@ -146,10 +203,26 @@ defmodule NatureWhistle.EventHandler do
 
       manage_debounce_and_alert(alert, value, metadata)
 
-      record_rate_limit(alert, current_time)
+      record_rate_limit_if_configured(alert, current_time)
     else
       _ ->
         :ok
+    end
+  end
+
+  defp record_sliding_window_event_if_configured(alert, now) do
+    if is_list(Map.get(alert, :sliding_window)) do
+      record_sliding_window_event(alert, now)
+    else
+      :ok
+    end
+  end
+
+  defp record_rate_limit_if_configured(alert, now) do
+    if is_list(Map.get(alert, :rate_limit)) do
+      record_rate_limit(alert, now)
+    else
+      :ok
     end
   end
 

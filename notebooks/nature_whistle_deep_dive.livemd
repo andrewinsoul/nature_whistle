@@ -1,0 +1,705 @@
+# NatureWhistle: how it is used and how it works
+
+## Section
+
+> A code-first tour of the NatureWhistle v0.4.1 implementation.
+> 
+> This notebook explains the public API, the telemetry pipeline, alert normalization, ETS state, asynchronous delivery, suppression, recovery, aggregation, built-in packs, and the design trade-offs behind the library.
+
+## Learning goals
+
+By the end of this notebook, you should be able to:
+
+1. Configure NatureWhistle in an Elixir application.
+2. Emit a telemetry event and understand how NatureWhistle receives it.
+3. Define metric and event alerts, and inspect the aggregate-alert components.
+4. Explain why ETS is used for alert definitions and runtime state.
+5. Explain why notification delivery is moved to supervised tasks.
+6. Understand rate limiting, sliding-window suppression, and recovery timers.
+7. Register and unregister alerts while the BEAM is running.
+8. Explain how the BEAM, Ecto, and Oban packs fit into the same pipeline.
+9. Identify the boundaries and trade-offs of the current design.
+
+## 1. Setup
+
+This notebook lives in the repository's `notebooks/` directory and loads the local project as a path dependency. If you move the notebook, update `project_path` accordingly.
+
+```elixir
+project_path = Path.expand("..", __DIR__)
+
+Mix.install(
+  [{:nature_whistle, path: project_path}],
+  start_applications: false
+)
+```
+
+The project is a library application, so this notebook starts the telemetry dependency and NatureWhistle directly. We start with no configured alerts so the examples can add isolated runtime alerts without triggering unrelated BEAM alerts.
+
+```elixir
+Application.put_env(:nature_whistle, :alerts, [])
+
+Application.put_env(:nature_whistle, :notifiers_config, [
+  %{name: :console, service: :console, config: %{}}
+])
+
+Application.put_env(:nature_whistle, :retry, [
+  max_attempts: 3,
+  base_delay_ms: 50,
+  max_delay_ms: 200
+])
+
+Application.put_env(:nature_whistle, :background_sweep_interval_ms, 1_000)
+Application.put_env(:nature_whistle, :beam_metric_interval_ms, 60_000)
+
+{:ok, _} = Application.ensure_all_started(:telemetry)
+
+if is_nil(Process.whereis(NatureWhistle.Supervisor)) do
+  {:ok, _pid} = NatureWhistle.Application.start(:normal, [])
+end
+
+:ok
+```
+
+The application startup creates the ETS tables, loads configured alerts, attaches telemetry handlers, validates retry settings, and starts the supervision tree.
+
+<!-- livebook:{"break_markdown":true} -->
+
+NatureWhistle sits between an event producer and a notification destination:
+
+```mermaid
+flowchart LR
+  A[Application event] --> B[:telemetry.execute/3]
+  B --> C[Telemetry handler]
+  C --> D[EventHandler]
+  D --> E[Alert evaluation]
+  E --> F[ETS state and guards]
+  F --> G[Notification formatting of breach alert]
+  G --> H[Task.Supervisor]
+  H --> I[Console / Slack / Teams / Webhook]
+  F --> J[BackgroundCleaner]
+  J --> K[Calm notification]
+  K --> H
+```
+
+The diagram describes the implemented trigger path. The metric, event, ETS, async delivery, aggregate-trigger, aggregate-window recovery, and cleanup paths are connected. The important design choice is that the telemetry handler is on the emitting process's hot path. NatureWhistle therefore tries to do only the necessary evaluation there. Remote delivery is queued in a supervised task instead of making the request synchronously from the telemetry callback.
+
+```elixir
+[
+  supervisor: Process.whereis(NatureWhistle.Supervisor),
+  task_supervisor: Process.whereis(NatureWhistle.TaskSupervisor),
+  failure_tracker: Process.whereis(NatureWhistle.FailureTracker),
+  background_cleaner: Process.whereis(NatureWhistle.BackgroundCleaner),
+  ets_tables: [
+    :nature_whistle_alerts,
+    :nature_whistle_alert_state,
+    :nature_whistle_rate_limit,
+    :nature_whistle_correlation_state,
+    :nature_whistle_telemetry_handlers
+  ]
+  |> Enum.map(&{&1, :ets.whereis(&1)})
+]
+```
+
+## 3. What a telemetry event looks like
+
+```
+:telemetry.execute(
+  event_name,
+  measurements,
+  metadata
+)
+```
+
+<!-- livebook:{"break_markdown":true} -->
+
+For example:
+
+```elixir
+:telemetry.execute(
+  [:demo_app, :request, :stop],
+  %{duration: 780},
+  %{path: "/users", status: 200}
+)
+```
+
+The event name identifies what happened. Measurements are numeric values that can be checked against thresholds. Metadata carries context that can be logged or used to format a message.
+
+NatureWhistle attaches `NatureWhistle.EventHandler.handle_event/4` to every event referenced by an active alert. The handler receives the event name, measurements, metadata, and the telemetry handler configuration.
+
+## 4. Alert definitions and normalization
+
+An alert is written as a map or keyword list. The application normalizes it before placing it in ETS. The normalized representation contains the fields used by the runtime, including:
+
+* `:id`
+* `:event`
+* `:condition`
+* `:measurement_key`
+* `:threshold`
+* `:formatter`
+* `:alert_message`
+* `:calm_message`
+* `:debounce_ms`
+* `:resolution_ms`
+* `:rate_limit`
+* `:sliding_window`
+* `:notifiers`
+* optional aggregation and correlation data
+
+For a metric alert, the measurement is compared with the threshold.
+
+```elixir
+metric_alert = %{
+  id: :demo_latency,
+  event: [:demo_app, :request, :stop],
+  condition: :metric,
+  measurement_key: :duration,
+  threshold: 500_000,
+  formatter: fn duration -> "#{div(duration, 1_000)} ms" end,
+  alert_message: "Slow request: %{value}",
+  calm_message: "Request latency recovered: %{value}",
+  resolution_ms: 25_000,
+  notifiers: [:console]
+}
+```
+
+The formatter is useful when the raw telemetry unit is not the unit you want humans to read. In this example, a duration of `780` is displayed as `0 ms` because the formatter assumes microseconds and integer division is used. For a more illustrative value, emit `780_000` microseconds or use a formatter appropriate to your application's unit.
+
+The default `condition` is metric-like when no explicit condition is supplied. Explicit conditions make the intent clearer in learning material.
+
+## 5. Runtime registration
+
+For a running application, alerts can be registered without a restart. This is useful for experiments, tenant-specific rules, administrative configuration, or a control plane that changes alert rules dynamically.
+
+```elixir
+case NatureWhistle.register_alert(metric_alert) do
+  {:ok, registered_alert} -> registered_alert
+  error -> error
+end
+```
+
+The returned alert is the normalized runtime representation. Compare the original input with the stored version:
+
+```elixir
+NatureWhistle.get_alert_config(:demo_latency)
+```
+
+The alert is grouped in the `:nature_whistle_alerts` ETS table by telemetry event:
+
+```elixir
+:ets.lookup(:nature_whistle_alerts, [:demo_app, :request, :stop])
+```
+
+Registration also synchronizes telemetry handlers. If this is the first alert for an event, NatureWhistle attaches a handler for that event. If the last alert for an event is removed, the handler is detached.
+
+Runtime alerts are ephemeral. They are held in memory and disappear when the BEAM or application restarts. Persistent alerts belong in application configuration.
+
+## 6. Metric alert: breach, state, and recovery
+
+Now emit a value above the threshold:
+
+```elixir
+:telemetry.execute(
+  [:demo_app, :request, :stop],
+  %{duration: 780_000},
+  %{path: "/users", status: 200}
+)
+
+Process.sleep(100)
+
+[
+  alert_state: :ets.lookup(:nature_whistle_alert_state, :demo_latency),
+  rate_limit_state: :ets.tab2list(:nature_whistle_rate_limit)
+]
+```
+
+The important sequence is:
+
+1. `:telemetry` invokes `NatureWhistle.EventHandler`.
+2. The handler looks up alerts for `[:demo_app, :request, :stop]`.
+3. The measurement `:duration` is extracted from `%{duration: 780_000}`.
+4. The value is compared with the normalized threshold.
+5. Alert state is written to `:nature_whistle_alert_state`.
+6. The notification is formatted.
+7. A child is started under `NatureWhistle.TaskSupervisor`.
+8. The console notifier logs the message.
+9. A recovery timer is managed by `NatureWhistle.BackgroundCleaner`.
+
+A healthy value does not immediately send a calm notification. NatureWhistle uses a resolution window so a brief healthy sample does not flap the alert immediately back to normal.
+
+```elixir
+:telemetry.execute(
+  [:demo_app, :request, :stop],
+  %{duration: 100_000},
+  %{path: "/users", status: 200}
+)
+
+Process.sleep(100)
+
+[
+  alert_state_before_resolution: :ets.lookup(:nature_whistle_alert_state, :demo_latency),
+  cleaner_state: :sys.get_state(NatureWhistle.BackgroundCleaner)
+]
+```
+
+Wait past the `resolution_ms` value and inspect the state again:
+
+```elixir
+Process.sleep(600)
+
+[
+  alert_state_after_resolution: :ets.lookup(:nature_whistle_alert_state, :demo_latency),
+  cleaner_state: :sys.get_state(NatureWhistle.BackgroundCleaner)
+]
+```
+
+The expected lifecycle is `healthy -> breached -> recovering -> healthy`. The background cleaner removes the breached state and sends the calm notification when the timer expires.
+
+Clean up this alert before the next examples:
+
+```elixir
+NatureWhistle.unregister_alert(:demo_latency)
+```
+
+## 7. Event alerts
+
+A metric alert needs a numeric measurement. An event alert treats occurrence itself as the signal.
+
+```elixir
+event_alert = %{
+  id: :demo_worker_crash,
+  event: [:demo_app, :worker, :crash],
+  condition: :event,
+  alert_message: "Worker crash detected",
+  notifiers: [:console]
+}
+
+case NatureWhistle.register_alert(event_alert) do
+  {:ok, alert} -> alert
+  error -> error
+end
+
+
+:telemetry.execute(
+  [:demo_app, :worker, :crash],
+  %{},
+  %{worker: DemoWorker, reason: :timeout}
+)
+
+Process.sleep(100)
+```
+
+Event alerts are useful for exceptions, crashes, disconnects, and other signals where the existence of the event matters more than a measurement threshold.
+
+```elixir
+NatureWhistle.unregister_alert(:demo_worker_crash)
+```
+
+## 8. Aggregate alerts and the FailureTracker
+
+An aggregate alert turns repeated events into one actionable signal. The `FailureTracker` keeps timestamps for an aggregation key and answers whether the failure count has crossed a threshold within a time window.
+
+The normalizer expects aggregate options to be a keyword list because it uses `Keyword.fetch!/2` and `Keyword.get/3`. An aggregate definition also needs a `:key` function that turns telemetry metadata into the logical identity being tracked.
+
+```elixir
+aggregate_definition = %{
+  id: :demo_repeated_failures,
+  event: [:demo_app, :job, :failure],
+  condition:
+    {:aggregate,
+     [
+       key: fn metadata -> Map.get(metadata, :job_id) end,
+       failures: 3,
+       within_ms: 5_000,
+       measurement_key: :failure_count
+     ]},
+  alert_message: "Repeated failures: %{value}",
+  calm_message: "Failure rate recovered",
+  resolution_ms: 500,
+  notifiers: [:console]
+}
+
+{:ok, normalized} = NatureWhistle.register_alert(aggregate_definition)
+normalized
+```
+
+> The aggregate options are a keyword list, and the required `key` function defines the logical failure stream. The README now documents this same form.
+
+The event handler now follows this path for aggregate alerts:
+
+```text
+telemetry event
+    ↓
+extract aggregate key from metadata
+    ↓
+FailureTracker.record_failure/5
+    ↓
+:below_threshold → do nothing
+:active          → do nothing
+:triggered       → handle_breach/3
+    ↓
+normal ETS state, guards, and async notification flow
+```
+
+Emit three failures for the same logical job:
+
+```elixir
+failure_event = [:demo_app, :job, :failure]
+
+for attempt <- 1..3 do
+  :telemetry.execute(
+    failure_event,
+    %{failure_count: 1},
+    %{job_id: "job-42", attempt: attempt}
+  )
+end
+
+Process.sleep(100)
+
+[
+  tracker: :sys.get_state(NatureWhistle.FailureTracker),
+  alert_state: :ets.lookup(:nature_whistle_alert_state, :demo_repeated_failures)
+]
+```
+
+The first two events should remain below the threshold. The third returns `{:triggered, 3}` and promotes the count into the normal breach path. Additional failures for the same key return `{:active, count}` and do not trigger another breach notification while the aggregate window remains active.
+
+Aggregate recovery is driven by the aggregation window rather than `resolution_ms`. Sweep the tracker past the window and observe the calm notification:
+
+```elixir
+FailureTracker.sweep(System.monotonic_time(:millisecond) + 6_000)
+Process.sleep(100)
+
+:ets.lookup(:nature_whistle_alert_state, :demo_repeated_failures)
+```
+
+The tracker can also be studied directly with deterministic timestamps:
+
+```elixir
+alias NatureWhistle.FailureTracker
+
+FailureTracker.reset()
+
+[
+  FailureTracker.record_failure(:manual, :job_42, 3, 5_000, 0),
+  FailureTracker.record_failure(:manual, :job_42, 3, 5_000, 1_000),
+  FailureTracker.record_failure(:manual, :job_42, 3, 5_000, 2_000)
+]
+```
+
+The expected statuses are `{:below_threshold, 1}`, `{:below_threshold, 2}`, and `{:triggered, 3}`. Different keys are tracked independently, so failures for `job-42` do not count toward `job-99`.
+
+```elixir
+FailureTracker.sweep(6_001)
+FailureTracker.reset()
+NatureWhistle.unregister_alert(:demo_repeated_failures)
+```
+
+Aggregate recovery is now connected as well: the tracker reports expired active windows to the configured recovery handler, the handler clears the alert state, and the normal notification layer sends the calm message. If an alert has multiple active failure keys, the final key to recover resolves the alert.
+
+## 9. Rate limiting and sliding-window suppression
+
+These controls solve different problems:
+
+* `rate_limit` limits how often an alert may notify over a time window.
+* `sliding_window` suppresses noisy bursts by counting recent events.
+
+Example configuration:
+
+```elixir
+guarded_alert = %{
+  id: :demo_guarded_latency,
+  event: [:demo_app, :guarded, :request],
+  condition: :metric,
+  measurement_key: :duration,
+  threshold: 500,
+  rate_limit: [window_ms: 5_000, max_events: 2],
+  sliding_window: [window_ms: 2_000, max_events: 3],
+  alert_message: "Guarded latency: %{value}",
+  calm_message: "Guarded latency recovered: %{value}",
+  resolution_ms: 500,
+  notifiers: [:console]
+}
+
+{:ok, _} = NatureWhistle.register_alert(guarded_alert)
+```
+
+The event handler checks the guards before allowing an actionable breach. The timestamps are held in the public ETS rate-limit table so the system can make fast decisions without a database round trip.
+
+```elixir
+for _ <- 1..8 do
+  :telemetry.execute(
+    [:demo_app, :guarded, :request],
+    %{duration: 900_000},
+    %{}
+  )
+end
+
+Process.sleep(100)
+
+:ets.tab2list(:nature_whistle_rate_limit)
+```
+
+The background cleaner periodically prunes stale rate-limit and sliding-window buckets. This keeps memory bounded instead of allowing every historical event timestamp to remain forever.
+
+```elixir
+NatureWhistle.BackgroundCleaner.prune_expired_buckets(1_000)
+```
+
+```elixir
+NatureWhistle.unregister_alert(:demo_guarded_latency)
+```
+
+## 10. Notification formatting and delivery
+
+The notification layer has two responsibilities:
+
+1. Format the alert or calm message.
+2. Dispatch it to the configured notifier profiles.
+
+A notifier profile has a name, a service, and service-specific configuration:
+
+```elixir
+Application.put_env(:nature_whistle, :notifiers_config, [
+  %{name: :console, service: :console, config: %{}},
+  %{
+    name: :ops_webhook,
+    service: :webhook,
+    config: %{
+      webhook_url: "https://example.test/alerts",
+      method: :post,
+      headers: [],
+      payload: %{source: "nature_whistle"}
+    }
+  }
+])
+```
+
+An alert selects profiles by name:
+
+```elixir
+%{
+  id: :profile_routed_alert,
+  event: [:demo_app, :profile, :event],
+  condition: :event,
+  alert_message: "Profile-routed event occurred",
+  notifiers: [:console, :ops_webhook]
+}
+```
+
+The current built-in services are `:console`, `:slack`, `:teams`, and `:webhook`. HTTP notifiers share the retry helper. The retry configuration supports total attempts, base delay, and maximum delay. Backoff doubles after failures and is capped by the maximum delay.
+
+Remote delivery is started with:
+
+```elixir
+Task.Supervisor.start_child(
+  NatureWhistle.TaskSupervisor,
+  fn ->
+    # dispatch notifier
+  end
+)
+```
+
+This is an important BEAM design decision. The telemetry-producing process does not wait for Slack, Teams, or a webhook endpoint to respond. If a delivery task fails, the supervised task is isolated from the event-emitting process.
+
+For production use, do not put real credentials directly in a notebook. Use runtime configuration, environment variables, or your host application's secret-management approach.
+
+## 11. Built-in alert packs
+
+NatureWhistle can turn integration-specific signals into ordinary alert definitions. A pack implements the `NatureWhistle.Pack` behaviour:
+
+```elixir
+@callback alerts(keyword()) :: [map()]
+```
+
+### BEAM pack
+
+The BEAM pack reads VM statistics and emits telemetry events in the `[:vm, ...]` namespace. Supported metrics include:
+
+* total VM memory
+* process memory
+* ETS memory
+* binary memory
+* process count
+* atom count
+* port count
+* total run queue
+
+Inspect the generated definitions:
+
+```elixir
+beam_alerts = NatureWhistle.Packs.Beam.alerts([])
+
+Enum.map(beam_alerts, &Map.take(&1, [:id, :event, :measurement_key, :threshold]))
+```
+
+The collector periodically calls the pack's collection logic and emits only the metrics required by active BEAM alerts. This avoids sampling every possible metric when the application only cares about a subset.
+
+```elixir
+NatureWhistle.Packs.Beam.collect([:process_count, :run_queue])
+```
+
+### Ecto and Oban packs
+
+The Ecto pack translates Ecto telemetry measurements into slow-query, queue-time, database-execution, decode, and encode alerts. The Oban pack translates job lifecycle and failure events into slow-job, exception, and repeated-failure alerts.
+
+They do not create a separate alerting system. They create definitions that enter the same normal pipeline:
+
+```text
+integration telemetry
+        ↓
+pack-generated alert definition
+        ↓
+ETS registry
+        ↓
+EventHandler
+        ↓
+state guards and notification delivery
+```
+
+This is a strong extensibility boundary: integrations produce telemetry and packs translate integration-specific configuration into the library's common alert shape.
+
+## 12. Inspecting the supervision tree
+
+NatureWhistle's application starts a `one_for_one` supervision tree containing:
+
+* `NatureWhistle.TaskSupervisor`
+* `NatureWhistle.FailureTracker`
+* `NatureWhistle.Packs.Beam.Collector`
+* `NatureWhistle.BackgroundCleaner`
+
+```elixir
+Supervisor.which_children(NatureWhistle.Supervisor)
+```
+
+`one_for_one` means a failed child is restarted independently. A temporary problem in the failure tracker should not take down notification tasks or the background cleaner.
+
+The supervision tree is one of the places where the BEAM model provides value beyond a collection of isolated functions: the runtime keeps the supporting processes alive and can restart them according to a defined policy.
+
+## 13. The complete request-to-notification path
+
+Here is the complete path for a metric alert:
+
+```text
+1. Your application emits :telemetry.execute/3.
+2. Telemetry calls EventHandler.handle_event/4.
+3. EventHandler looks up the event in :nature_whistle_alerts.
+4. The measurement is extracted by measurement_key.
+5. The alert condition is evaluated.
+6. Rate-limit and sliding-window guards are checked.
+7. Aggregate alerts may consult FailureTracker.
+8. Alert state is written to :nature_whistle_alert_state.
+9. Notification formats %{value} and optional metadata placeholders.
+10. A child is started under TaskSupervisor.
+11. The notifier sends to console, Slack, Teams, or a webhook.
+12. BackgroundCleaner schedules recovery and prunes stale buckets.
+13. A calm notification is sent after the configured recovery window.
+```
+
+The most important hot-path property is that NatureWhistle does not make a remote network request inside the telemetry handler.
+
+## 14. Why ETS is used
+
+The implementation creates named public ETS tables for:
+
+* alert definitions grouped by telemetry event
+* current alert state
+* rate-limit and sliding-window timestamps
+* correlation state
+* telemetry handler registrations
+
+ETS is appropriate here because the data is runtime coordination state:
+
+* reads are frequent
+* the data is local to the BEAM node
+* persistence is not required for the basic alert path
+* the library wants to avoid coupling every event to a database
+* concurrent processes need shared access
+
+The trade-off is that ETS state is lost when the node restarts. That is acceptable for suppression windows and current breach state, but it means runtime registrations are not durable. If alert configuration must survive restarts, store it in application configuration or an external control plane and register it during startup.
+
+## 15. What the library protects you from
+
+NatureWhistle is deliberately defensive:
+
+* event-handler evaluation is wrapped so alert errors do not crash the host process
+* notification work runs asynchronously
+* HTTP notifiers use a shared retry path
+* rate limits reduce notification storms
+* sliding windows suppress bursts
+* recovery timers prevent immediate alert flapping
+* the background cleaner prunes stale runtime state
+* configuration validation fails early for invalid retry settings
+
+This is not a replacement for a full observability platform. It is a small alerting layer for applications that already emit useful telemetry and want actionable notifications without operating a separate alert manager.
+
+## 16. Exercises
+
+### Exercise A: add a custom formatter
+
+Create an alert for `[:exercise, :cache, :lookup]` with a `duration` measurement. Make the message display microseconds as milliseconds with two decimal places.
+
+```elixir
+# Your solution here
+```
+
+### Exercise B: add a runtime event alert
+
+Register an event alert for `[:exercise, :worker, :timeout]`, emit it, and inspect the alert state and console output.
+
+```elixir
+# Your solution here
+```
+
+### Exercise C: add an aggregate failure alert
+
+Create an aggregate alert that fires after five failures within ten seconds. Use a metadata key such as `:worker` as the logical failure key. Compare the result with a metric alert: aggregation is a pattern detector, while a metric alert evaluates one measurement at a time.
+
+```elixir
+# Your solution here
+```
+
+### Exercise D: trace the ETS tables
+
+After registering an alert, inspect:
+
+```elixir
+:ets.tab2list(:nature_whistle_alerts)
+:ets.tab2list(:nature_whistle_alert_state)
+:ets.tab2list(:nature_whistle_rate_limit)
+:ets.tab2list(:nature_whistle_telemetry_handlers)
+```
+
+Explain which table changes after registration, after a breach, and after recovery.
+
+## 17. Final summary
+
+NatureWhistle is a small OTP application built around a simple idea:
+
+```text
+telemetry event → alert rule → guarded state transition → async notification
+```
+
+Its Elixir-specific strengths are not only the alert rules themselves. They are the runtime properties around them:
+
+* telemetry callbacks can remain lightweight
+* ETS provides fast local coordination state
+* supervised tasks isolate notification delivery
+* GenServers manage aggregation and cleanup
+* the supervision tree keeps supporting processes alive
+* packs extend the system without duplicating the alert pipeline
+
+That combination is why NatureWhistle is a good case study for learning how an Elixir library becomes a living BEAM system rather than just a collection of functions.
+
+## Cleanup
+
+If you want to reset the notebook's demo state without restarting the Livebook session:
+
+```elixir
+for id <- [:demo_latency, :demo_worker_crash, :demo_repeated_failures, :demo_guarded_latency] do
+  NatureWhistle.unregister_alert(id)
+end
+
+NatureWhistle.FailureTracker.reset()
+
+:ok
+```

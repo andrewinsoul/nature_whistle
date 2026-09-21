@@ -42,6 +42,7 @@ defmodule NatureWhistle.Packs.ObanTest do
 
     assert alert.event == [:oban, :job, :exception]
     assert alert.condition == :event
+    assert alert.event_value == 1
   end
 
   test "configures job exception correlation" do
@@ -165,6 +166,8 @@ defmodule NatureWhistle.Packs.ObanTest do
     assert aggregate[:within_ms] == 60_000
     assert aggregate[:measurement_key] == :failure_count
     assert is_function(aggregate[:key], 1)
+    assert alert.alert_message == "🚨 Oban repeated job failures: %{value}"
+    assert alert.calm_message == "✅ Oban repeated job failures recovered: %{value}"
   end
 
   test "uses the default failure detection window" do

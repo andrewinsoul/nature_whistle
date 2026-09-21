@@ -2,11 +2,16 @@ defmodule NatureWhistle do
   @moduledoc """
   `NatureWhistle` is the public entry point for the library.
 
-  It holds the default alert templates shipped with the project and provides
-  helpers for looking up alert definitions from application configuration.
+  It provides helpers for looking up, registering, and unregistering alert
+  definitions. The built-in alert templates are provided by the BEAM pack and
+  loaded by `NatureWhistle.Application` when no custom `:alerts` setting is
+  present.
 
-  The runtime itself is started through `NatureWhistle.Application`, but this
-  module is still useful because it documents the shape of the alert structures
+  The runtime is started by the `:nature_whistle` OTP application. Consumers
+  normally only add the dependency and configure it; they do not add
+  `NatureWhistle.Application` as a second child in their supervision tree.
+
+  This module also documents the shape of the alert structures
   that flow through the rest of the system:
 
   - alert definitions are configured as maps or keyword lists
@@ -90,10 +95,8 @@ defmodule NatureWhistle do
 
   Runtime registrations are ephemeral and are not persisted across a BEAM
   restart. The alert's telemetry event is attached immediately so subsequent
-  events follow the normal NatureWhistle processing pipeline.
-
-  Runtime registrations are ephemeral and are not persisted across a BEAM
-  restart. The alert uses the same notification pipeline as configured alerts.
+  events follow the same processing and notification pipeline as configured
+  alerts.
   """
   def register_alert(alert) do
     NatureWhistle.Application.register_alert(alert)

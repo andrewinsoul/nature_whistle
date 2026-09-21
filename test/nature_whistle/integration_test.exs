@@ -3,6 +3,7 @@ defmodule NatureWhistle.IntegrationTest do
 
   alias NatureWhistle.EventHandler
   alias NatureWhistle.BackgroundCleaner
+  alias NatureWhistle.FailureTracker
 
   import NatureWhistle.TestHelpers
   import ExUnit.CaptureLog
@@ -15,6 +16,7 @@ defmodule NatureWhistle.IntegrationTest do
     :ets.delete_all_objects(@alerts_table)
     :ets.delete_all_objects(@state_table)
     :ets.delete_all_objects(@rate_limit_table)
+    :ok = FailureTracker.reset()
 
     :sys.replace_state(BackgroundCleaner, fn state ->
       %{state | timers: %{}}
@@ -24,6 +26,7 @@ defmodule NatureWhistle.IntegrationTest do
       :ets.delete_all_objects(@alerts_table)
       :ets.delete_all_objects(@state_table)
       :ets.delete_all_objects(@rate_limit_table)
+      FailureTracker.reset()
     end)
 
     :ok
@@ -79,6 +82,61 @@ defmodule NatureWhistle.IntegrationTest do
       cleaner_state = :sys.get_state(BackgroundCleaner)
 
       refute Map.has_key?(cleaner_state.timers, alert.id)
+    end
+
+    test "aggregate alert registered through the public API recovers with a calm notification" do
+      alert = %{
+        id: :integration_aggregate_alert,
+        event: [:test, :aggregate],
+        condition:
+          {:aggregate,
+           [
+             key: fn metadata -> Map.get(metadata, :job_id) end,
+             failures: 3,
+             within_ms: 50
+           ]},
+        alert_message: "🚨 AGGREGATE BREACH: %{value}",
+        calm_message: "✅ AGGREGATE CALM",
+        notifiers: [:console]
+      }
+
+      on_exit(fn ->
+        NatureWhistle.unregister_alert(alert.id)
+      end)
+
+      assert {:ok, registered} = NatureWhistle.register_alert(alert)
+      assert {:aggregate, aggregate} = registered.condition
+      assert aggregate[:failures] == 3
+      assert aggregate[:within_ms] == 50
+      assert is_function(aggregate[:key], 1)
+
+      alert_id = alert.id
+
+      breach_log =
+        capture_log(fn ->
+          for attempt <- 1..3 do
+            :telemetry.execute(
+              alert.event,
+              %{failure_count: 1},
+              %{job_id: "job-42", attempt: attempt}
+            )
+          end
+
+          Process.sleep(20)
+        end)
+
+      assert breach_log =~ "AGGREGATE BREACH: 3"
+      assert [{^alert_id, :breached, _expiry}] = :ets.lookup(@state_table, alert_id)
+
+      recovery_log =
+        capture_log(fn ->
+          FailureTracker.sweep(System.monotonic_time(:millisecond) + 100)
+          Process.sleep(20)
+        end)
+
+      assert recovery_log =~ "AGGREGATE CALM"
+      assert :ets.lookup(@state_table, alert_id) == []
+      assert :ok = NatureWhistle.unregister_alert(alert_id)
     end
 
     test "debounce extension: repeated breaches push back the quiet window expiration" do

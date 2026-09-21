@@ -1,4 +1,25 @@
 defmodule NatureWhistle.Packs.Oban do
+  @moduledoc """
+  Alert definitions for the real Oban job telemetry contract.
+
+  This pack is a telemetry consumer. It does not depend on or start Oban. The
+  application must include Oban separately; when Oban emits its standard job
+  events, NatureWhistle can evaluate the generated alerts:
+
+    * `[:oban, :job, :stop]` for completed-job duration and queue-time alerts
+    * `[:oban, :job, :exception]` for job-failure and repeated-failure alerts
+
+  Oban reports `:duration` and `:queue_time` in native time units. Pack options
+  accept thresholds in milliseconds and convert them to native units before
+  building alert definitions.
+
+  The exception alert correlates a failed job using `{job_id, worker, queue}`.
+  A matching `:stop` event with `state: :success` is treated as the recovery
+  signal for the calm notification. Slow-job and slow-queue alerts currently
+  listen to `:stop`; they do not apply
+  those thresholds to failed `:exception` events.
+  """
+
   @behaviour NatureWhistle.Pack
 
   @job_events %{
@@ -70,7 +91,9 @@ defmodule NatureWhistle.Packs.Oban do
       event: @job_events[event_name],
       condition: :metric,
       measurement_key: measurement,
-      threshold: System.convert_time_unit(threshold_ms, :millisecond, :native)
+      threshold: System.convert_time_unit(threshold_ms, :millisecond, :native),
+      alert_message: "🚨 Oban #{alert_name} breached: %{value}",
+      calm_message: "✅ Oban #{alert_name} recovered: %{value}"
     }
   end
 
@@ -96,6 +119,7 @@ defmodule NatureWhistle.Packs.Oban do
         recovery?: &__MODULE__.successful_stop?/1
       },
       message_formatter: &__MODULE__.notification_metadata/1,
+      event_value: 1,
       alert_message: "🚨 Oban job %{job_id} failed — %{worker} on queue %{queue}",
       calm_message: "✅ Oban job %{job_id} recovered — %{worker} on queue %{queue}"
     }
@@ -122,7 +146,9 @@ defmodule NatureWhistle.Packs.Oban do
            measurement_key: :failure_count
          ]},
       threshold: failures,
-      measurement_key: :failure_count
+      measurement_key: :failure_count,
+      alert_message: "🚨 Oban repeated job failures: %{value}",
+      calm_message: "✅ Oban repeated job failures recovered: %{value}"
     }
   end
 end

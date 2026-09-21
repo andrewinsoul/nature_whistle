@@ -3,6 +3,7 @@ defmodule NatureWhistle.EventHandlerTest do
 
   alias NatureWhistle.EventHandler
   alias NatureWhistle.Packs.Oban
+  alias NatureWhistle.FailureTracker
   import ExUnit.CaptureLog
 
   @alerts_table :nature_whistle_alerts
@@ -28,6 +29,12 @@ defmodule NatureWhistle.EventHandlerTest do
     :ets.delete_all_objects(@rate_limit_table)
     :ets.delete_all_objects(@correlation_state_table)
 
+    if Process.whereis(FailureTracker) == nil do
+      {:ok, _pid} = FailureTracker.start_link([])
+    end
+
+    :ok = FailureTracker.reset()
+
     test_alert = %{
       id: :test_latency_alert,
       event: [:iex, :test],
@@ -35,6 +42,8 @@ defmodule NatureWhistle.EventHandlerTest do
       threshold: 100,
       resolution_ms: 10_000,
       debounce_ms: 0,
+      rate_limit: nil,
+      sliding_window: nil,
       alert_message: "🚨 ALERT!",
       calm_message: "✨ CALM!"
     }
@@ -66,6 +75,8 @@ defmodule NatureWhistle.EventHandlerTest do
              [{:test_latency_alert, :breached, _expiry}],
              :ets.lookup(@state_table, :test_latency_alert)
            )
+
+    assert :ets.tab2list(@rate_limit_table) == []
   end
 
   test "handle_event/4 starts recovery when a breached metric becomes healthy" do
@@ -278,6 +289,95 @@ defmodule NatureWhistle.EventHandlerTest do
     assert :ets.lookup(@state_table, alert.id) == []
   end
 
+  test "aggregate alert stays below threshold until enough failures occur" do
+    [alert] =
+      Oban.alerts(failure_detection: [failures: 3, within_ms: 60_000])
+      |> Enum.filter(&(&1.id == :nature_whistle_oban_repeated_job_failures))
+
+    alert =
+      Map.merge(alert, %{
+        alert_message: "🚨 REPEATED FAILURES!",
+        calm_message: "✨ FAILURES RECOVERED!",
+        debounce_ms: 0,
+        resolution_ms: 10_000,
+        notifiers: [:console],
+        event_value: 1
+      })
+
+    :ets.insert(@alerts_table, {alert.event, [alert]})
+
+    execute_oban_exception(456)
+    execute_oban_exception(456)
+
+    assert :ets.lookup(@state_table, alert.id) == []
+
+    execute_oban_exception(456)
+
+    alert_id = alert.id
+
+    assert [{^alert_id, :breached, _expiry}] =
+             :ets.lookup(@state_table, alert.id)
+  end
+
+  test "aggregate alert does not trigger again while failure window remains active" do
+    [alert] =
+      Oban.alerts(failure_detection: [failures: 3, within_ms: 60_000])
+      |> Enum.filter(&(&1.id == :nature_whistle_oban_repeated_job_failures))
+
+    :ets.insert(@alerts_table, {alert.event, [alert]})
+
+    log =
+      capture_log(fn ->
+        execute_oban_exception(456)
+        execute_oban_exception(456)
+        execute_oban_exception(456)
+        Process.sleep(20)
+      end)
+
+    refute log =~ "NatureWhistle alert handler crashed"
+
+    alert_id = alert.id
+
+    assert [{^alert_id, :breached, _expiry}] =
+             :ets.lookup(@state_table, alert.id)
+
+    execute_oban_exception(456)
+
+    assert [{^alert_id, :breached, _expiry}] =
+             :ets.lookup(@state_table, alert.id)
+  end
+
+  test "aggregate alert tracks different failure keys independently" do
+    [alert] =
+      Oban.alerts(failure_detection: [failures: 3, within_ms: 60_000])
+      |> Enum.filter(&(&1.id == :nature_whistle_oban_repeated_job_failures))
+
+    :ets.insert(@alerts_table, {alert.event, [alert]})
+
+    execute_oban_exception(456)
+    execute_oban_exception(456)
+
+    execute_oban_exception(789)
+    execute_oban_exception(789)
+
+    assert :ets.lookup(@state_table, alert.id) == []
+
+    execute_oban_exception(456)
+
+    alert_id = alert.id
+
+    assert [{^alert_id, :breached, _expiry}] =
+             :ets.lookup(@state_table, alert.id)
+  end
+
+  test "aggregate recovery stays deferred while another key is active" do
+    assert :ok = EventHandler.handle_aggregate_recovery({:missing_alert, :job_42, true})
+  end
+
+  test "aggregate recovery ignores malformed recovery notifications" do
+    assert :ok = EventHandler.handle_aggregate_recovery(:unexpected_recovery)
+  end
+
   @tag :skip
   test "handle_event/4 extends the debounce timer when a breached metric stays high" do
     alert = %{
@@ -418,8 +518,6 @@ defmodule NatureWhistle.EventHandlerTest do
     [alert] =
       NatureWhistle.Packs.Oban.alerts([])
       |> Enum.filter(&(&1.id == :nature_whistle_oban_job_exception))
-
-    alert = Map.put(alert, :event_value, 1)
 
     :ets.insert(@alerts_table, {alert.event, [alert]})
 

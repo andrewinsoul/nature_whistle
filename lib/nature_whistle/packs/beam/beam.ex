@@ -221,8 +221,11 @@ defmodule NatureWhistle.Packs.Beam do
       :default ->
         alert
 
-      threshold ->
+      threshold when is_integer(threshold) ->
         %{alert | threshold: threshold}
+
+      _ ->
+        raise ArgumentError, "Invalid threshold value for #{metric}, must be an integer"
     end
   end
 

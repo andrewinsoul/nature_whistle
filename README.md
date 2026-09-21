@@ -24,19 +24,17 @@ It is designed for simple setup and low runtime overhead:
 
 ```mermaid
 flowchart LR
-  T[:telemetry.execute] --> H[EventHandler]
-  H --> G[EventGuard]
-  G -->|breach allowed| S[State update]
-  S --> N[Notification]
-  N --> Q[Task.Supervisor]
-  Q --> C[Console / Slack / Teams / Webhook]
-  S --> B[BackgroundCleaner timer]
-  B -->|resolution reached| C2[Calm notification]
-  B -->|cleanup sweep| R[Prune stale ETS buckets]
-  H --> F[FailureTracker]
-  F -->|aggregate threshold reached| S
-  Beam[BEAM Pack] --> BC[BEAM Collector]
-  BC -->|Telemetry events| H
+  A[Application event] --> B[:telemetry.execute/3]
+  B --> C[Telemetry handler]
+  C --> D[EventHandler]
+  D --> E[Alert evaluation]
+  E --> F[ETS state and guards]
+  F --> G[Notification formatting of breach alert]
+  G --> H[Task.Supervisor]
+  H --> I[Console / Slack / Teams / Webhook]
+  F --> J[BackgroundCleaner]
+  J --> K[Calm notification]
+  K --> H
 ```
 
 When a telemetry event arrives:
@@ -46,8 +44,13 @@ When a telemetry event arrives:
 3. `NatureWhistle.EventGuard` applies rate-limit and sliding-window checks.
 4. Aggregate alerts can pass repeated failures through `NatureWhistle.FailureTracker` to determine whether the configured failure threshold has been reached within an aggregation window.
 5. If the breach is actionable, the alert state is marked as breached and an alert notification is queued.
-6. `NatureWhistle.BackgroundCleaner` later resolves the alert and sends the calm notification once the resolution timer expires.
-7. Runtime alerts can be added or removed without restarting the application.
+6. Metric alerts enter recovery when a healthy measurement is received and remain
+   healthy for `resolution_ms`; aggregate alerts recover when their active failure
+   windows expire; correlated event alerts recover when their matching recovery
+   event satisfies the configured predicate.
+7. `NatureWhistle.BackgroundCleaner` manages metric-resolution timers, aggregate
+   recovery sweeps, and stale guard-state cleanup.
+8. Runtime alerts can be added or removed without restarting the application.
 
 ## Features
 
@@ -99,6 +102,31 @@ An event alert reacts to the occurrence of a telemetry event. It is useful when 
 }
 ```
 
+An event alert reacts to occurrence; it does not automatically know when the
+problem is resolved and therefore does not automatically send a calm message.
+Add `correlation` when another telemetry event represents recovery:
+
+```elixir
+%{
+  id: :worker_crashed,
+  event: [:my_app, :worker, :crash],
+  condition: :event,
+  correlation: %{
+    key: fn metadata -> metadata.worker end,
+    recovery_event: [:my_app, :worker, :healthy],
+    recovery?: fn metadata -> metadata.status == :ok end
+  },
+  alert_message: "🚨 Worker crash detected",
+  calm_message: "✅ Worker recovered",
+  notifiers: [:console]
+}
+```
+
+NatureWhistle correlates the failure and recovery using the value returned by
+`key`. A recovery for a different key does not match the failed occurrence. When
+the recovery predicate matches, NatureWhistle sends the calm notification and
+clears that correlation record.
+
 ### Aggregate
 
 An aggregate alert turns repeated failures into an actionable signal. Failures must reach the configured threshold within the aggregation window.
@@ -107,14 +135,22 @@ An aggregate alert turns repeated failures into an actionable signal. Failures m
 %{
   id: :repeated_failures,
   event: [:my_app, :job, :failure],
-  condition: {:aggregate, %{failures: 5, within_ms: 60_000}},
+  condition:
+    {:aggregate,
+     [
+       key: fn metadata -> Map.get(metadata, :job_id) end,
+       failures: 5,
+       within_ms: 60_000
+     ]},
   alert_message: "🚨 Repeated failures: %{value}",
   calm_message: "✅ Failure rate recovered",
   notifiers: [:console]
 }
 ```
 
-`NatureWhistle.FailureTracker` is responsible only for determining when repeated failures become significant. Once the aggregate threshold is reached, the result flows through the same normal alert state and notification machinery used by the other alert primitives.
+Aggregate options are a keyword list. The required `:key` function receives telemetry metadata and returns the logical identity whose failures should be counted, such as a job ID, worker, endpoint, or tenant. Failures for different keys are tracked independently.
+
+`NatureWhistle.FailureTracker` determines when repeated failures become significant. Once the aggregate threshold is reached, the count flows through the same normal alert state, guard, and notification machinery used by the other alert primitives. When the aggregation window expires, the tracker reports recovery and NatureWhistle clears the breached state and sends the configured calm notification. If an alert has multiple active failure keys, it is resolved only after all active keys have recovered.
 
 ## 🚀 Installation & Setup
 
@@ -128,19 +164,13 @@ defp deps do
 end
 ```
 
-Then add `NatureWhistle.Application` to your supervision tree:
+`NatureWhistle.Application` is started automatically as the dependency's OTP
+application. You do not need to add it as a second child in your supervision
+tree. Configure the application and start your normal application as usual.
 
-```elixir
-def start(_type, _args) do
-  children = [
-    MyApp.Repo,
-    MyAppWeb.Endpoint,
-    NatureWhistle.Application
-  ]
-
-  Supervisor.start_link(children, strategy: :one_for_one)
-end
-```
+If your application deliberately uses `runtime: false` or starts dependencies
+manually, start `:nature_whistle` explicitly before registering alerts or
+emitting telemetry events.
 
 ## Configuration
 
@@ -256,31 +286,62 @@ Runtime alerts are **ephemeral**. They live in memory and are lost when the BEAM
 | --- | --- | --- |
 | `id` | Yes | Unique alert identifier used for ETS state and runtime registration. |
 | `event` | Yes | Telemetry event name, for example `[:vm, :memory, :total]`. |
-| `condition` | No, defaults to `:metric` | Alert primitive: `:metric`, `:event`, or aggregate configuration. |
-| `measurement_key` | No, defaults to `:value` | Key in the telemetry measurements map that holds the numeric value. |
-| `threshold` | Depends on condition | Threshold/value used by the alert condition. |
+| `condition` | No, defaults to `:metric` | Alert primitive: `:metric`, `:event`, or `{:aggregate, [key: key_fun, failures: count, within_ms: window]}`. |
+| `measurement_key` | No, defaults to `:value` | Key in the telemetry measurements map that holds the numeric value. Aggregate alerts use their key function to identify the failure stream. |
+| `threshold` | Depends on condition | Threshold/value used by metric alerts; aggregate alerts use `failures` inside the aggregate options. |
 | `alert_message` | No | Message used when the alert becomes actionable. Supports `%{value}`. |
 | `calm_message` | No | Message used when the alert returns to normal. Supports `%{value}`. |
 | `formatter` | No | Optional one-argument function for custom value formatting. |
 | `resolution_ms` | No, defaults to `60_000` | How long the active alert remains in its breached lifecycle before recovery. |
 | `notifiers` | No, defaults to `[:console]` | List of notifier profile names to use for this alert. |
-| `rate_limit` | No, defaults to `nil` | Optional traffic cap that blocks repeated dispatches within `window_ms`. |
-| `sliding_window` | No, defaults to `nil` | Optional breach-density gate for recent breaches. |
-| `aggregate` | No | Aggregation settings used by aggregate alerts. |
-| `correlation` | No | Correlation configuration for alerts that depend on related telemetry events. |
+| `rate_limit` | No, defaults to `nil` | Optional notification cap. When `nil` or omitted, rate-limit checks and ETS bookkeeping are disabled. |
+| `sliding_window` | No, defaults to `nil` | Optional recent-breach-density gate. When `nil` or omitted, sliding-window checks and ETS bookkeeping are disabled. |
+| `event_value` | No, defaults to `1` | Value passed through the event-alert notification path. |
+| `message_formatter` | No | Optional one-argument function that formats metadata for notification messages. |
+| `correlation` | No | `%{key: key_fun, recovery_event: event, recovery?: predicate}` configuration for event-alert recovery. |
+| `aggregate` | No | Derived runtime field; configure aggregation through `condition: {:aggregate, options}` instead. |
 
-### Important note on timing
+### Important note on timing and recovery
 
-The current runtime uses `resolution_ms` as the active alert lifecycle timer. The alert remains in a breached state until that timer expires or is extended by another breach. `debounce_ms` is stored in the loaded alert config, but it is not part of the active runtime decision path yet.
+`resolution_ms` is the active recovery timer for metric alerts. A metric alert
+must receive a healthy measurement and remain healthy for that duration before
+NatureWhistle sends its calm notification. A later breach during recovery cancels
+that recovery timer.
+
+An event alert has no numeric healthy measurement, so it does not recover from
+`resolution_ms` alone. It needs a configured `correlation` with a matching
+`recovery_event` and `recovery?` predicate. Without that, the event alert remains
+an occurrence record and has no automatic calm transition.
+
+Aggregate alerts recover from their `within_ms` failure windows. The
+`NatureWhistle.FailureTracker` reports expired active windows to the runtime,
+which clears the aggregate breach when no active failure key remains and sends
+the calm notification.
+
+`debounce_ms` is stored in the normalized alert configuration, but it is not
+part of the active runtime decision path yet.
 
 ### Aggregation window vs notification window
 
 These are different concepts:
 
-- The **aggregation window** determines how many failures must occur within a period before an aggregate alert becomes actionable.
-- The **notification sliding window** controls how frequently notifications are allowed after a signal has been detected.
+- The **aggregation window** (`within_ms`) determines how many failures must
+  occur within a period before an aggregate alert becomes actionable.
+- The **rate-limit window** controls the long-term number of notification
+  dispatches allowed for an alert.
+- The **notification sliding window** controls recent breach density and
+  suppresses bursts or flapping inside its configured window.
+- The **resolution window** (`resolution_ms`) controls metric-alert recovery
+  after a healthy measurement.
 
-`NatureWhistle.FailureTracker` tracks aggregation state independently for each alert ID and failure key.
+`rate_limit` and `sliding_window` are opt-in. Passing `nil` or omitting either
+option disables that guard completely, including its ETS bookkeeping. They do
+not replace the normal breached-state transition that prevents duplicate
+notifications during one continuous breach.
+
+`NatureWhistle.FailureTracker` tracks aggregation state independently for each
+alert ID and failure key. If one alert has several active failure keys, the
+alert remains breached until all active keys recover.
 
 ## Notifier Profiles
 
@@ -346,6 +407,23 @@ The main runtime API is intentionally small:
 - `NatureWhistle.Notifier.*` modules implement the built-in delivery backends, while `NatureWhistle.Notifier.Behaviour` defines the notifier contract.
 
 The HexDocs module pages are the authoritative API-level reference for these functions and their configuration options.
+
+## Documentation
+
+The project is configured to publish this README, the changelog, and the
+module API pages through ExDoc:
+
+```bash
+mix docs
+```
+
+The generated site is written to `doc/`. Publishing a new package version to
+Hex.pm publishes the corresponding documentation to HexDocs as part of the
+release process:
+
+```bash
+mix hex.publish
+```
 
 ## Built-in Behavior
 
@@ -467,9 +545,54 @@ Set any supported alert threshold to `false` to disable that alert from the pack
 
 ### Oban
 
-The Oban pack provides alert definitions for Oban-related operational signals, including repeated job failures and slow jobs/queues where configured.
+The Oban pack is a telemetry consumer; it does not start Oban or add Oban as a
+dependency. Your application supplies the real Oban package and its telemetry
+events, while NatureWhistle translates those events into alert definitions.
 
-Pack-generated alerts use the same alert primitives and notification pipeline as manually configured alerts.
+The pack consumes the real Oban job telemetry event names:
+
+```elixir
+[:oban, :job, :stop]
+[:oban, :job, :exception]
+```
+
+Oban publishes `duration` and `queue_time` measurements in native time units
+on both events. The pack accepts thresholds in milliseconds and converts them
+to native units before NatureWhistle evaluates them.
+
+By default, the pack creates:
+
+| Alert | Event | Measurement or signal |
+| --- | --- | --- |
+| `:nature_whistle_oban_slow_job` | `[:oban, :job, :stop]` | `:duration` |
+| `:nature_whistle_oban_slow_queue` | `[:oban, :job, :stop]` | `:queue_time` |
+| `:nature_whistle_oban_job_exception` | `[:oban, :job, :exception]` | Event occurrence |
+
+The slow-job and slow-queue alerts currently cover completed `:stop` events.
+They do not evaluate failed `:exception` events against those duration
+thresholds. The exception alert uses the Oban job ID, worker, and queue as its
+correlation key and treats a matching `:stop` event with `state: :success` as
+recovery:
+
+```elixir
+config :nature_whistle,
+  packs: [
+    {NatureWhistle.Packs.Oban,
+     thresholds: [
+       slow_job: 5_000,
+       slow_queue: 1_000
+     ],
+     failure_detection: [
+       failures: 3,
+       within_ms: 300_000
+     ]}
+  ]
+```
+
+`failure_detection` is disabled by default. When enabled, repeated exceptions
+for the same `{job_id, worker, queue}` key are aggregated before producing an
+alert. Pack-generated alerts use the same alert primitives and notification
+pipeline as manually configured alerts.
 
 ## Default Alerts
 
@@ -530,7 +653,7 @@ NatureWhistle sits between raw telemetry and full observability stacks. If you a
 Use it when you want:
 
 - immediate notification on threshold breaches
-- a calm message when the system recovers
+- a calm message when a metric, aggregate, or correlated event alert recovers
 - simple config-driven alerting
 - minimal overhead in the hot path
 
