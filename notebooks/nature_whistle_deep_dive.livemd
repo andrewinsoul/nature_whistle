@@ -2,9 +2,11 @@
 
 ## Section
 
-> A code-first tour of the NatureWhistle v0.4.1 implementation.
+> A code-first tour of the NatureWhistle v0.4.3 implementation.
 > 
-> This notebook explains the public API, the telemetry pipeline, alert normalization, ETS state, asynchronous delivery, suppression, recovery, aggregation, built-in packs, and the design trade-offs behind the library.
+> This notebook explains the public API, the telemetry pipeline, alert normalization, ETS state,
+> asynchronous delivery suppression mechanisms, recovery, aggregation, built-in packs, and the design
+> trade-offs behind the library.
 
 ## Learning goals
 
@@ -18,7 +20,8 @@ By the end of this notebook, you should be able to:
 6. Understand rate limiting, sliding-window suppression, and recovery timers.
 7. Register and unregister alerts while the BEAM is running.
 8. Explain how the BEAM, Ecto, and Oban packs fit into the same pipeline.
-9. Identify the boundaries and trade-offs of the current design.
+9. Manually exercise mailbox saturation, stall, recovery, process-death, and ownership behavior.
+10. Identify the boundaries and trade-offs of the current design.
 
 ## 1. Setup
 
@@ -29,7 +32,8 @@ project_path = Path.expand("..", __DIR__)
 
 Mix.install(
   [{:nature_whistle, path: project_path}],
-  start_applications: false
+  start_applications: false,
+  force: true
 )
 ```
 
@@ -39,7 +43,7 @@ The project is a library application, so this notebook starts the telemetry depe
 Application.put_env(:nature_whistle, :alerts, [])
 
 Application.put_env(:nature_whistle, :notifiers_config, [
-  %{name: :console, service: :console, config: %{}}
+  %{name: :console_service, service: :console, config: %{}}
 ])
 
 Application.put_env(:nature_whistle, :retry, [
@@ -50,6 +54,18 @@ Application.put_env(:nature_whistle, :retry, [
 
 Application.put_env(:nature_whistle, :background_sweep_interval_ms, 1_000)
 Application.put_env(:nature_whistle, :beam_metric_interval_ms, 60_000)
+
+# Security demo configuration. These are applied before NatureWhistle starts,
+# so startup validation checks their shape as well.
+Application.put_env(:nature_whistle, :sensitive_metadata_keys, [
+  :customer_email,
+  :access_token,
+  "account-id"
+])
+
+Application.put_env(:nature_whistle, :sensitive_metrics, [
+  [:demo_app, :billing, :balance]
+])
 
 {:ok, _} = Application.ensure_all_started(:telemetry)
 
@@ -158,13 +174,52 @@ metric_alert = %{
   alert_message: "Slow request: %{value}",
   calm_message: "Request latency recovered: %{value}",
   resolution_ms: 25_000,
-  notifiers: [:console]
+  notifiers: [:console_service]
 }
 ```
 
-The formatter is useful when the raw telemetry unit is not the unit you want humans to read. In this example, a duration of `780` is displayed as `0 ms` because the formatter assumes microseconds and integer division is used. For a more illustrative value, emit `780_000` microseconds or use a formatter appropriate to your application's unit.
+##### Telemetry values and thresholds must use the same unit.
 
-The default `condition` is metric-like when no explicit condition is supplied. Explicit conditions make the intent clearer in learning material.
+The threshold is compared directly against the value extracted from the telemetry measurement. NatureWhistle does not convert between units when evaluating a metric alert.
+
+For example, if :duration is emitted in microseconds, a threshold of 500_000 means 500,000 microseconds (500 ms)
+
+So, the emitted measurement must therefore also be in microseconds:
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+:telemetry.execute(
+  [:demo_app, :request, :stop],
+  %{duration: 780_000},
+  %{}
+)
+```
+
+<!-- livebook:{"break_markdown":true} -->
+
+If the application instead emits the duration in seconds:
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+%{duration: 0.78}
+```
+
+the threshold and measurement are now expressed in different units. NatureWhistle will still perform the comparison, but the result will be meaningless because 0.78 is being compared directly with 500_000.
+
+<!-- livebook:{"break_markdown":true} -->
+
+The formatter is different. It does not participate in threshold evaluation. It is only used to turn the raw measurement into a human-readable value for the notification.
+For example:
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+formatter: fn duration -> "#{div(duration, 1_000)} ms" end
+```
+
+With a raw value of 780_000 microseconds, the alert can compare the raw value correctly against the 500_000 microsecond threshold, while the formatter displays the value as: 780 ms
 
 ## 5. Runtime registration
 
@@ -318,8 +373,11 @@ aggregate_definition = %{
   notifiers: [:console]
 }
 
-{:ok, normalized} = NatureWhistle.register_alert(aggregate_definition)
-normalized
+case NatureWhistle.register_alert(aggregate_definition) do
+  {:ok, normalized} -> {:ok, normalized}
+  error -> error
+end
+
 ```
 
 > The aggregate options are a keyword list, and the required `key` function defines the logical failure stream. The README now documents this same form.
@@ -345,10 +403,10 @@ Emit three failures for the same logical job:
 ```elixir
 failure_event = [:demo_app, :job, :failure]
 
-for attempt <- 1..3 do
+for attempt <- 1..6 do
   :telemetry.execute(
     failure_event,
-    %{failure_count: 1},
+    %{failure_count: 3},
     %{job_id: "job-42", attempt: attempt}
   )
 end
@@ -366,6 +424,7 @@ The first two events should remain below the threshold. The third returns `{:tri
 Aggregate recovery is driven by the aggregation window rather than `resolution_ms`. Sweep the tracker past the window and observe the calm notification:
 
 ```elixir
+alias NatureWhistle.FailureTracker
 FailureTracker.sweep(System.monotonic_time(:millisecond) + 6_000)
 Process.sleep(100)
 
@@ -558,7 +617,298 @@ state guards and notification delivery
 
 This is a strong extensibility boundary: integrations produce telemetry and packs translate integration-specific configuration into the library's common alert shape.
 
-## 12. Inspecting the supervision tree
+## 12. Mailbox saturation monitoring
+
+`NatureWhistle.MailboxMonitor` uses the BEAM's node-local `:long_message_queue` system monitor rather than polling every process. It owns that system-monitor slot only when no other system monitor is active on the VM.
+
+The mailbox lifecycle has four telemetry events:
+
+```text
+queue crosses threshold
+        ↓
+    :saturated
+        │
+        ├── remains saturated for duration_ms ──→ :stall
+        │
+        ├── drops below disable_threshold ──────→ :recovered
+        │
+        └── tracked process terminates ─────────→ :dead
+                                                    └── reason
+```
+
+The separate `threshold` and `disable_threshold` values provide hysteresis. For example, with `threshold: 10` and `disable_threshold: 5`, entering saturation requires the queue to reach the high-water mark, while recovery requires it to fall below the lower boundary. This prevents the state from flapping when the queue hovers around one value.
+
+Mailbox monitoring is opt-in when NatureWhistle starts normally:
+
+```elixir
+Application.put_env(:nature_whistle, :mailbox_monitor,
+  enabled: true,
+  threshold: 1_000,
+  disable_threshold: 900,
+  duration_ms: 90_000
+)
+```
+
+For the manual experiments below, however, we start a short-lived monitor directly with deliberately tiny thresholds. This makes the behavior observable without putting thousands of messages into a process mailbox.
+
+### Manual-test helpers
+
+Run this cell once. The helper attaches a telemetry handler that forwards mailbox events to the current Livebook evaluator, and provides a worker whose mailbox can intentionally build up.
+
+```elixir
+mailbox_events = [
+  [:nature_whistle, :vm, :mailbox, :saturated],
+  [:nature_whistle, :vm, :mailbox, :stall],
+  [:nature_whistle, :vm, :mailbox, :recovered],
+  [:nature_whistle, :vm, :mailbox, :dead]
+]
+
+mailbox_handler_id = "nature-whistle-livebook-mailbox-#{System.unique_integer([:positive])}"
+mailbox_recipient = self()
+
+:ok =
+  :telemetry.attach_many(
+    mailbox_handler_id,
+    mailbox_events,
+    fn event, measurements, metadata, recipient ->
+      send(recipient, {:mailbox_telemetry, event, measurements, metadata})
+    end,
+    mailbox_recipient
+  )
+
+start_mailbox_monitor = fn opts ->
+  defaults = [
+    name: nil,
+    threshold: 10,
+    disable_threshold: 5,
+    duration_ms: 250,
+    enrich: [:current_function, :status, :message_queue_len, :total_heap_size]
+  ]
+
+  NatureWhistle.MailboxMonitor.start_link(Keyword.merge(defaults, opts))
+end
+
+mailbox_worker = fn ->
+  spawn(fn ->
+    receive do
+      :drain ->
+        receive do
+          :stop -> :ok
+        after
+          50 -> :ok
+        end
+
+      :stop ->
+        :ok
+    end
+  end)
+end
+
+flood_mailbox = fn pid, count ->
+  Enum.each(1..count, fn n -> send(pid, {:queued_message, n}) end)
+end
+
+:ok
+```
+
+If a cell returns `:ignore` and logs that another system monitor is active, inspect the current owner before continuing:
+
+```elixir
+:erlang.system_monitor()
+```
+
+NatureWhistle deliberately does not replace another system monitor. Stop the existing owner only if you know it belongs to this notebook experiment.
+
+### Manual test A: saturation and sustained stall
+
+This worker only matches `:drain` and `:stop`, so the `{:queued_message, n}` messages remain in its mailbox. Once the queue crosses the threshold, expect `:saturated`; if it remains above the recovery boundary for `duration_ms`, expect `:stall`.
+
+```elixir
+{:ok, mailbox_monitor} = start_mailbox_monitor.([])
+worker = mailbox_worker.()
+
+flood_mailbox.(worker, 20)
+
+saturated =
+  receive do
+    {:mailbox_telemetry, [:nature_whistle, :vm, :mailbox, :saturated], measurements, metadata} ->
+      %{event: :saturated, measurements: measurements, metadata: metadata}
+  after
+    1_000 -> :saturated_event_not_received
+  end
+
+stall =
+  receive do
+    {:mailbox_telemetry, [:nature_whistle, :vm, :mailbox, :stall], measurements, metadata} ->
+      %{event: :stall, measurements: measurements, metadata: metadata}
+  after
+    1_000 -> :stall_event_not_received
+  end
+
+[saturated: saturated, stall: stall]
+```
+
+The metadata should identify the affected `pid` and include the configured safe process information. Stacktraces and process dictionaries are not included by default.
+
+Clean up this experiment before starting the next one:
+
+```elixir
+Process.exit(worker, :kill)
+GenServer.stop(mailbox_monitor)
+:ok
+```
+
+### Manual test B: recovery before the stall timer expires
+
+For this experiment, use a longer stall duration. After saturation is observed, explicitly send the monitor the same recovery signal the BEAM system monitor would send when the queue falls below the disable threshold. This deterministic check is useful for validating the NatureWhistle state transition itself without depending on scheduler timing while experimenting in Livebook.
+
+```elixir
+{:ok, recovery_monitor} = start_mailbox_monitor.([duration_ms: 1_000])
+recovery_worker = mailbox_worker.()
+
+send(recovery_monitor, {:monitor, recovery_worker, :long_message_queue, true})
+
+saturated =
+  receive do
+    {:mailbox_telemetry, [:nature_whistle, :vm, :mailbox, :saturated], measurements, metadata} ->
+      %{event: :saturated, measurements: measurements, metadata: metadata}
+  after
+    500 -> :saturated_event_not_received
+  end
+
+send(recovery_monitor, {:monitor, recovery_worker, :long_message_queue, false})
+
+recovered =
+  receive do
+    {:mailbox_telemetry, [:nature_whistle, :vm, :mailbox, :recovered], measurements, metadata} ->
+      %{event: :recovered, measurements: measurements, metadata: metadata}
+  after
+    500 -> :recovered_event_not_received
+  end
+
+unexpected_stall =
+  receive do
+    {:mailbox_telemetry, [:nature_whistle, :vm, :mailbox, :stall], measurements, metadata} ->
+      %{event: :unexpected_stall, measurements: measurements, metadata: metadata}
+  after
+    1_100 -> :no_stall_after_recovery
+  end
+
+[
+  saturated: saturated,
+  recovered: recovered,
+  stall_check: unexpected_stall
+]
+```
+
+The expected result is `:saturated`, then `:recovered`, with `:no_stall_after_recovery`. Recovery cancels both the pending stall timer and the lifecycle monitor for that tracking episode.
+
+```elixir
+Process.exit(recovery_worker, :kill)
+GenServer.stop(recovery_monitor)
+:ok
+```
+
+### Manual test C: process death is terminal, not recovery
+
+This is the lifecycle distinction introduced by the current mailbox-monitor implementation. Once a saturated process is being tracked, `Process.monitor/1` lets NatureWhistle observe its termination. A dead process did not recover, so the terminal event is `:dead`, and the `:DOWN` reason is preserved in telemetry metadata.
+
+```elixir
+{:ok, death_monitor} = start_mailbox_monitor.([duration_ms: 5_000])
+death_worker = mailbox_worker.()
+
+send(death_monitor, {:monitor, death_worker, :long_message_queue, true})
+
+saturated =
+  receive do
+    {:mailbox_telemetry, [:nature_whistle, :vm, :mailbox, :saturated], measurements, metadata} ->
+      %{event: :saturated, measurements: measurements, metadata: metadata}
+  after
+    500 -> :saturated_event_not_received
+  end
+
+Process.exit(death_worker, :kill)
+
+dead =
+  receive do
+    {:mailbox_telemetry, [:nature_whistle, :vm, :mailbox, :dead], measurements,
+     %{pid: ^death_worker, reason: reason} = metadata} ->
+      %{
+        event: :dead,
+        reason: reason,
+        measurements: measurements,
+        metadata: metadata
+      }
+  after
+    500 -> :dead_event_not_received
+  end
+
+unexpected_recovery =
+  receive do
+    {:mailbox_telemetry, [:nature_whistle, :vm, :mailbox, :recovered], measurements, metadata} ->
+      %{event: :unexpected_recovery, measurements: measurements, metadata: metadata}
+  after
+    100 -> :no_recovery_event
+  end
+
+[death: dead, recovery_check: unexpected_recovery]
+```
+
+With `Process.exit(death_worker, :kill)`, the expected terminal metadata contains `reason: :killed`, and no `:recovered` event should be emitted.
+
+```elixir
+GenServer.stop(death_monitor)
+:ok
+```
+
+### Manual test D: ownership is node-local and non-destructive
+
+The BEAM system monitor has one owner per VM. NatureWhistle should claim it when free, but it must not replace an existing owner.
+
+```elixir
+{:ok, owner_monitor} =
+  start_mailbox_monitor.([
+    name: :livebook_mailbox_owner,
+    duration_ms: 1_000
+  ])
+
+owner_before = :erlang.system_monitor()
+
+candidate =
+  NatureWhistle.MailboxMonitor.start_link(
+    name: :livebook_mailbox_candidate,
+    threshold: 10,
+    disable_threshold: 5,
+    duration_ms: 1_000
+  )
+
+owner_after = :erlang.system_monitor()
+
+[
+  owner_before: owner_before,
+  candidate_result: candidate,
+  owner_after: owner_after,
+  owner_preserved?: owner_before == owner_after
+]
+```
+
+The candidate should return `:ignore`, and `owner_preserved?` should be `true`. This demonstrates why mailbox ownership is per BEAM VM rather than coordinated with `:global` across a cluster.
+
+```elixir
+GenServer.stop(owner_monitor)
+:ok
+```
+
+### Manual-test cleanup
+
+Detach the notebook telemetry handler after finishing the mailbox experiments:
+
+```elixir
+:telemetry.detach(mailbox_handler_id)
+:ok
+```
+
+## 13. Inspecting the supervision tree
 
 NatureWhistle's application starts a `one_for_one` supervision tree containing:
 
@@ -566,6 +916,7 @@ NatureWhistle's application starts a `one_for_one` supervision tree containing:
 * `NatureWhistle.FailureTracker`
 * `NatureWhistle.Packs.Beam.Collector`
 * `NatureWhistle.BackgroundCleaner`
+* optional `NatureWhistle.MailboxMonitor` when explicitly enabled
 
 ```elixir
 Supervisor.which_children(NatureWhistle.Supervisor)
@@ -575,7 +926,7 @@ Supervisor.which_children(NatureWhistle.Supervisor)
 
 The supervision tree is one of the places where the BEAM model provides value beyond a collection of isolated functions: the runtime keeps the supporting processes alive and can restart them according to a defined policy.
 
-## 13. The complete request-to-notification path
+## 14. The complete request-to-notification path
 
 Here is the complete path for a metric alert:
 
@@ -597,7 +948,7 @@ Here is the complete path for a metric alert:
 
 The most important hot-path property is that NatureWhistle does not make a remote network request inside the telemetry handler.
 
-## 14. Why ETS is used
+## 15. Why ETS is used
 
 The implementation creates named public ETS tables for:
 
@@ -617,7 +968,7 @@ ETS is appropriate here because the data is runtime coordination state:
 
 The trade-off is that ETS state is lost when the node restarts. That is acceptable for suppression windows and current breach state, but it means runtime registrations are not durable. If alert configuration must survive restarts, store it in application configuration or an external control plane and register it during startup.
 
-## 15. What the library protects you from
+## 16. What the library protects you from
 
 NatureWhistle is deliberately defensive:
 
@@ -628,11 +979,279 @@ NatureWhistle is deliberately defensive:
 * sliding windows suppress bursts
 * recovery timers prevent immediate alert flapping
 * the background cleaner prunes stale runtime state
-* configuration validation fails early for invalid retry settings
+* configuration validation fails early for invalid retry settings and invalid sensitive-data configuration
+* notification metadata is redacted before message formatting and delivery
+* configured telemetry measurements can be replaced with `[REDACTED]` before they reach formatters or notifiers
+* webhook URLs must use HTTPS unless `allow_insecure_http: true` is explicitly configured
+* webhook HTTP failures and transport errors are reduced to a generic retry reason instead of carrying response bodies or raw transport reasons through the retry path
+
+These safeguards have clear boundaries: sensitive-key redaction is based on key names and explicit configuration, not semantic inspection of arbitrary strings. The built-in webhook URL validation checks scheme and host shape; it does not block private-network destinations or provide a complete SSRF defence. In this project, webhook destinations are trusted developer configuration rather than public user input.
 
 This is not a replacement for a full observability platform. It is a small alerting layer for applications that already emit useful telemetry and want actionable notifications without operating a separate alert manager.
 
-## 16. Exercises
+## 17. Security flow: sensitive data redaction
+
+This section exercises the security implementation in the running notebook. The setup cell configured these options before the application started:
+
+```elixir
+Application.get_env(:nature_whistle, :sensitive_metadata_keys) |> IO.inspect(label: "SENSITIVE METADATA KEYS <<<<<< ")
+Application.get_env(:nature_whistle, :sensitive_metrics) |> IO.inspect(label: "SENSITIVE METRICS <<<<<<<<< ")
+```
+
+`NatureWhistle.Setup.init/0` validates both configuration values before creating the ETS tables. The supported configuration shapes are:
+
+* `:sensitive_metadata_keys` — a list of non-empty atoms or strings. Keys are normalized before matching, so `:access_token` and `"access-token"` are treated equivalently.
+* `:sensitive_metrics` — a list of non-empty Telemetry event-name lists, with every event segment an atom.
+
+### 17.1 Redact nested metadata
+
+The implementation redacts keys matching common sensitive fragments such as `password`, `secret`, `token`, `authorization`, `cookie`, `api_key`, `private_key`, and `credential`, as well as keys explicitly configured by the developer. It recursively walks maps, lists, tuples, and structs.
+
+```elixir
+sensitive_metadata = %{
+  "account-id" => "acct-demo-123",
+  customer_email: "person@example.test",
+  access_token: "fake-token-do-not-use",
+  request: %{
+    authorization: "Bearer fake-auth-value",
+    path: "/billing"
+  },
+  harmless: "this remains visible"
+}
+
+NatureWhistle.Notifier.Security.redact_metadata(sensitive_metadata)
+```
+
+Expected shape: the email, token, account ID, and authorization values are replaced with `"[REDACTED]"`; the path and harmless value remain unchanged. These are fake values for this local experiment.
+
+Try the explicit configuration argument separately:
+
+```elixir
+NatureWhistle.Notifier.Security.redact_metadata(
+  %{customer_ref: "customer-demo-7", region: "eu-west"},
+  [:customer_ref]
+)
+```
+
+### 17.2 Redact a configured measurement
+
+A metric event can be marked sensitive by its full Telemetry event name. When that event triggers a notification, the measurement value is replaced before the value formatter and message template process it.
+
+```elixir
+sensitive_event = [:demo_app, :billing, :balance]
+
+NatureWhistle.Notifier.Security.redact_measurement(
+  sensitive_event,
+  987_654
+)
+
+NatureWhistle.Notifier.Security.redact_measurement(
+  [:demo_app, :request, :stop],
+  780_000
+)
+```
+
+The first call returns `"[REDACTED]"`; the second returns the original value because that event is not configured as sensitive. The event name must match exactly.
+
+### 17.3 Exercise the actual notification pipeline
+
+The next cell calls the same public notification path used by the library after an alert decision. It uses the console notifier only, so it does not send anything over the network. Console metadata logging is enabled temporarily so you can inspect the sanitized metadata in the Livebook output.
+
+```elixir
+original_notifiers = Application.get_env(:nature_whistle, :notifiers_config)
+
+Application.put_env(:nature_whistle, :notifiers_config, [
+  %{name: :security_demo_console, service: :console, config: %{include_metadata: true}}
+])
+
+security_demo_alert = %{
+  id: :security_redaction_demo,
+  event: [:demo_app, :billing, :balance],
+  alert_message: "Billing balance alert value=%{value}; customer=%{customer_email}",
+  calm_message: "Billing balance recovered value=%{value}; customer=%{customer_email}",
+  notifiers: [:security_demo_console],
+  formatter: fn value -> "formatter received: #{inspect(value)}" end,
+  message_formatter: fn metadata ->
+    %{customer_email: Map.get(metadata, :customer_email, "not-provided")}
+  end
+}
+
+NatureWhistle.Notification.send_notification(
+  security_demo_alert,
+  987_654,
+  %{
+    customer_email: "person@example.test",
+    access_token: "fake-token-do-not-use",
+    request: %{path: "/billing", authorization: "Bearer fake-auth-value"}
+  },
+  :alert
+)
+
+Process.sleep(100)
+```
+
+Inspect the Livebook output. The measurement and sensitive metadata supplied to formatting should already be redacted. The console metadata diagnostic should also show redacted values. The notification is asynchronous, so the short sleep simply gives the supervised delivery task time to run; it is not a delivery guarantee for production code.
+
+Restore the original notifier configuration after the experiment:
+
+```elixir
+if is_nil(original_notifiers) do
+  Application.delete_env(:nature_whistle, :notifiers_config)
+else
+  Application.put_env(:nature_whistle, :notifiers_config, original_notifiers)
+end
+```
+
+Important boundary: redaction sanitizes the values supplied to developer-defined formatters, but it does not rewrite the output of a developer-authored formatter or message template. Treat custom formatter output and alert templates as trusted application code; do not put secrets into them directly.
+
+### 17.4 Validate the sensitive-data configuration
+
+These checks exercise the same validation functions called during startup. The final cell intentionally catches invalid examples so the notebook can continue running.
+
+```elixir
+NatureWhistle.Notifier.Security.validate_sensitive_metadata_keys!()
+NatureWhistle.Notifier.Security.validate_sensitive_metrics!()
+```
+
+```elixir
+invalid_metadata_config = fn ->
+  Application.put_env(:nature_whistle, :sensitive_metadata_keys, ["   "])
+  NatureWhistle.Notifier.Security.validate_sensitive_metadata_keys!()
+end
+
+invalid_metric_config = fn ->
+  Application.put_env(:nature_whistle, :sensitive_metrics, [:not_an_event_name])
+  NatureWhistle.Notifier.Security.validate_sensitive_metrics!()
+end
+
+metadata_validation_result =
+  try do
+    invalid_metadata_config.()
+    :unexpectedly_valid
+  rescue
+    error in ArgumentError -> {:rejected, Exception.message(error)}
+  after
+    Application.put_env(:nature_whistle, :sensitive_metadata_keys, [:customer_email, :access_token, "account-id"])
+  end
+
+metric_validation_result =
+  try do
+    invalid_metric_config.()
+    :unexpectedly_valid
+  rescue
+    error in ArgumentError -> {:rejected, Exception.message(error)}
+  after
+    Application.put_env(:nature_whistle, :sensitive_metrics, [[:demo_app, :billing, :balance]])
+  end
+
+%{
+  metadata_validation: metadata_validation_result,
+  metric_validation: metric_validation_result
+}
+```
+
+Both invalid configurations should be rejected with `ArgumentError`. The `after` blocks restore the valid demo configuration even if validation raises.
+
+## 18. Webhook URL validation and safe failure handling
+
+The HTTP notifier validates the configured URL before sending a request. HTTPS is accepted by default; HTTP is rejected unless `allow_insecure_http: true` is explicitly set. These checks below call the validator only and do not send requests to the supplied URLs.
+
+```elixir
+alias NatureWhistle.Notifier.Security
+
+https_result = Security.validate_webhook_url(%{webhook_url: "https://hooks.example.test/alerts"})
+http_result = Security.validate_webhook_url(%{webhook_url: "http://localhost:4000/alerts"})
+explicit_http_result = Security.validate_webhook_url(%{
+  webhook_url: "http://localhost:4000/alerts",
+  allow_insecure_http: true
+})
+invalid_scheme_result = Security.validate_webhook_url(%{webhook_url: "file:///tmp/alerts"})
+
+%{
+  https: https_result,
+  http_by_default: http_result,
+  http_with_explicit_opt_in: explicit_http_result,
+  unsupported_scheme: invalid_scheme_result
+}
+```
+
+Expected results:
+
+* HTTPS URL: `:ok`
+* HTTP without opt-in: `{:error, :insecure_webhook_url}`
+* HTTP with explicit opt-in: `:ok`
+* Unsupported scheme or missing host: `{:error, :invalid_webhook_url}`
+
+The `allow_insecure_http` option is intended only for trusted local or private testing. Do not use it to send real credentials over an untrusted network.
+
+### 18.1 Confirm failure reasons don't contain response data
+
+The webhook notifier maps non-2xx responses and transport errors to the generic reason `:webhook_request_failed`. The shared retry helper discards individual reasons and returns `{:error, :max_attempts_exceeded}` when attempts are exhausted. That means response bodies and raw transport reasons are not carried into the final error result.
+
+The automated Bypass tests cover this behaviour. You can also run a small local-only HTTP experiment below. It starts a temporary TCP listener on loopback, returns a fake HTTP 500 response containing a fake secret, and verifies that the final error result doesn't contain that response body. It does not contact a public endpoint.
+
+```elixir
+original_retry_config = Application.get_env(:nature_whistle, :retry)
+
+Application.put_env(:nature_whistle, :retry, [
+  max_attempts: 1,
+  base_delay_ms: 0,
+  max_delay_ms: 0
+])
+
+{:ok, listener} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
+{:ok, port} = :inet.port(listener)
+fake_response_secret = "fake-secret-response-body"
+
+server_task = Task.async(fn ->
+  {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+  {:ok, _request_bytes} = :gen_tcp.recv(socket, 0, 5_000)
+
+  response =
+    "HTTP/1.1 500 Internal Server Error\r\n" <>
+      "Content-Type: text/plain\r\n" <>
+      "Content-Length: #{byte_size(fake_response_secret)}\r\n" <>
+      "Connection: close\r\n\r\n" <>
+      fake_response_secret
+
+  :ok = :gen_tcp.send(socket, response)
+  :gen_tcp.close(socket)
+  :ok
+end)
+
+webhook_result =
+  try do
+    NatureWhistle.Notifier.Webhook.deliver(
+      "Livebook security test",
+      %{},
+      %{
+        webhook_url: "http://127.0.0.1:#{port}/alerts",
+        allow_insecure_http: true
+      }
+    )
+  after
+    :gen_tcp.close(listener)
+    if is_nil(original_retry_config) do
+      Application.delete_env(:nature_whistle, :retry)
+    else
+      Application.put_env(:nature_whistle, :retry, original_retry_config)
+    end
+  end
+
+server_result = Task.await(server_task, 5_000)
+
+%{
+  webhook_result: webhook_result,
+  server_result: server_result,
+  response_secret_in_final_result?: String.contains?(inspect(webhook_result), fake_response_secret)
+}
+```
+
+Expected: `webhook_result` is `{:error, :max_attempts_exceeded}`, `server_result` is `:ok`, and `response_secret_in_final_result?` is `false`. This is a manual smoke test, not a substitute for the automated Bypass tests.
+
+Security boundary: the current URL validator checks the scheme and presence of a host. It does **not** block private or loopback destinations, bind DNS validation to the actual connection, or claim complete SSRF protection. NatureWhistle treats webhook URLs as trusted developer configuration; the configuration is not intended to be supplied by public users. If that trust boundary changes, revisit destination restrictions and SSRF controls as a separate requirement.
+
+## 19. Exercises
 
 ### Exercise A: add a custom formatter
 
@@ -671,7 +1290,7 @@ After registering an alert, inspect:
 
 Explain which table changes after registration, after a breach, and after recovery.
 
-## 17. Final summary
+## 20. Final summary
 
 NatureWhistle is a small OTP application built around a simple idea:
 
@@ -684,6 +1303,8 @@ Its Elixir-specific strengths are not only the alert rules themselves. They are 
 * telemetry callbacks can remain lightweight
 * ETS provides fast local coordination state
 * supervised tasks isolate notification delivery
+* notification redaction reduces accidental exposure of configured sensitive values
+* webhook URL validation enforces HTTPS by default, while generic failure reasons avoid propagating response bodies
 * GenServers manage aggregation and cleanup
 * the supervision tree keeps supporting processes alive
 * packs extend the system without duplicating the alert pipeline
@@ -695,7 +1316,7 @@ That combination is why NatureWhistle is a good case study for learning how an E
 If you want to reset the notebook's demo state without restarting the Livebook session:
 
 ```elixir
-for id <- [:demo_latency, :demo_worker_crash, :demo_repeated_failures, :demo_guarded_latency] do
+for id <- [:demo_latency, :demo_worker_crash, :demo_repeated_failures, :demo_guarded_latency, :security_redaction_demo] do
   NatureWhistle.unregister_alert(id)
 end
 

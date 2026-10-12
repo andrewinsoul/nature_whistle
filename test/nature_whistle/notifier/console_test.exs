@@ -15,12 +15,30 @@ defmodule NatureWhistle.Notifier.ConsoleTest do
     assert log =~ "[NatureWhistle] Resource limit hit"
   end
 
-  test "deliver/3 dumps diagnostic metadata to debug level logs if not empty" do
+  test "deliver/3 does not log metadata by default" do
     log =
       capture_log(fn ->
-        Console.deliver("Resource limit hit", %{cpu_index: 2}, %{})
+        Console.deliver("Resource limit hit", %{password: "secret", cpu_index: 2}, %{})
       end)
 
-    assert log =~ "Alert metadata: %{cpu_index: 2}"
+    refute log =~ "Alert metadata"
+    refute log =~ "secret"
+  end
+
+  test "deliver/3 redacts sensitive fields when metadata logging is enabled" do
+    log =
+      capture_log([level: :debug], fn ->
+        Console.deliver(
+          "Resource limit hit",
+          %{password: "secret", nested: %{access_token: "token-value", cpu_index: 2}},
+          %{include_metadata: true}
+        )
+      end)
+
+    assert log =~ "Alert metadata"
+    assert log =~ "[REDACTED]"
+    assert log =~ "cpu_index: 2"
+    refute log =~ "secret"
+    refute log =~ "token-value"
   end
 end

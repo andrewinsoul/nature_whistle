@@ -36,17 +36,26 @@ defmodule NatureWhistle.Notifier.TeamsTest do
     end)
 
     assert {:ok, :sent} =
-             Teams.deliver("Teams Alert!", %{}, %{webhook_url: "http://localhost:#{bypass.port}"})
+             Teams.deliver("Teams Alert!", %{}, %{
+               webhook_url: "http://localhost:#{bypass.port}",
+               allow_insecure_http: true
+             })
   end
 
-  test "deliver/3 returns an error when Teams responds with a failure status", %{
-    bypass: bypass
-  } do
+  test "deliver/3 does not propagate a failure response body", %{bypass: bypass} do
+    secret_response_body = "provider echoed secret-token-456"
+
     Bypass.expect_once(bypass, fn conn ->
-      Plug.Conn.resp(conn, 500, "boom")
+      Plug.Conn.resp(conn, 500, secret_response_body)
     end)
 
-    assert {:error, :max_attempts_exceeded} =
-             Teams.deliver("Teams Alert!", %{}, %{webhook_url: "http://localhost:#{bypass.port}"})
+    result =
+      Teams.deliver("Teams Alert!", %{}, %{
+        webhook_url: "http://localhost:#{bypass.port}",
+        allow_insecure_http: true
+      })
+
+    assert result == {:error, :max_attempts_exceeded}
+    refute inspect(result) =~ secret_response_body
   end
 end

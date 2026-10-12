@@ -12,6 +12,10 @@ defmodule NatureWhistle.Notification do
   2. format the current value for human-friendly display
   3. queue delivery tasks for the matching notifier profiles
 
+  Before formatting, metadata is sanitized using the package's internal
+  redaction logic. Measurements for events listed in `:sensitive_metrics`
+  are replaced with `"[REDACTED]"`.
+
   The actual HTTP or console delivery logic lives in the notifier modules under
   `NatureWhistle.Notifier.*`.
   """
@@ -22,14 +26,13 @@ defmodule NatureWhistle.Notification do
     try do
       formatter.(value)
     rescue
-      e ->
-        Logger.error(
-          "NatureWhistle custom formatter failed: #{inspect(e)}. Falling back to string cast."
-        )
-
+      _exception ->
+        Logger.error("NatureWhistle custom formatter failed. Falling back to string cast.")
         to_string(value)
     end
   end
+
+  defp format_value(_alert, "[REDACTED]"), do: "[REDACTED]"
 
   defp format_value(%{event: [:vm, :memory, :total]}, value) do
     mb = div(value, 1_048_576)
@@ -82,8 +85,8 @@ defmodule NatureWhistle.Notification do
     end
   end
 
-  defp dispatch_to_notifier(:console, message, metadata, _config) do
-    NatureWhistle.Notifier.Console.deliver(message, metadata, %{})
+  defp dispatch_to_notifier(:console, message, metadata, config) do
+    NatureWhistle.Notifier.Console.deliver(message, metadata, config)
   end
 
   defp dispatch_to_notifier(other, _message, _metadata, _config) do
@@ -156,37 +159,28 @@ defmodule NatureWhistle.Notification do
   queued; it does not wait for the remote notifier request to complete.
   """
   def send_notification(alert, value, metadata, type) do
+    safe_value = NatureWhistle.Notifier.Security.redact_measurement(alert.event, value)
+    safe_metadata = NatureWhistle.Notifier.Security.redact_metadata(metadata)
+
     message_template = if type == :alert, do: alert.alert_message, else: alert.calm_message
-    message = format_message(alert, value, metadata, message_template)
+    message = format_message(alert, safe_value, safe_metadata, message_template)
 
     notifiers_config =
       Application.get_env(:nature_whistle, :notifiers_config, default_notifiers())
 
     alert_notifiers = Map.get(alert, :notifiers, [:console])
 
-    allowed_targets =
-      Enum.flat_map(alert_notifiers, fn notifier_name ->
-        case Enum.find(notifiers_config, fn config ->
-               is_map(config) and Map.get(config, :name) == notifier_name
-             end) do
-          %{service: service} ->
-            [service]
-
-          nil ->
-            Logger.warning("Notifier config not found for #{inspect(notifier_name)}")
-            []
-        end
-      end)
-
-    notifiers_config
-    |> Enum.filter(fn config ->
-      is_map(config) and Map.get(config, :service) in allowed_targets
+    Enum.flat_map(alert_notifiers, fn notifier_name ->
+      case Enum.find(notifiers_config, &(Map.get(&1, :name) == notifier_name)) do
+        notifier_config_map ->
+          [notifier_config_map]
+      end
     end)
-    |> Enum.each(fn %{service: notifier_name, config: notifier_config} ->
+    |> Enum.each(fn %{service: service, config: notifier_config} ->
       Task.Supervisor.start_child(
         NatureWhistle.TaskSupervisor,
         fn ->
-          dispatch_to_notifier(notifier_name, message, metadata, notifier_config)
+          dispatch_to_notifier(service, message, safe_metadata, notifier_config)
         end
       )
     end)
