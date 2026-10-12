@@ -18,7 +18,9 @@ defmodule NatureWhistle.Notifier.Behaviour do
   Implementations receive:
 
   - `message` - the final human-readable message with placeholders replaced
-  - `metadata` - the telemetry metadata associated with the event
+  - `metadata` - the raw telemetry metadata associated with the event. It may
+    contain sensitive application data; implementations must not forward it
+    blindly.
   - `config` - notifier-specific configuration, usually a map or keyword list
 
   Implementations should return:
