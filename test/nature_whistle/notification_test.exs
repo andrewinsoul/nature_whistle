@@ -8,8 +8,10 @@ defmodule NatureWhistle.NotificationTest do
   setup do
     original_notifiers_config = Application.get_env(:nature_whistle, :notifiers_config)
     original_retry = Application.get_env(:nature_whistle, :retry)
+
     original_sensitive_metadata_keys =
       Application.get_env(:nature_whistle, :sensitive_metadata_keys)
+
     original_sensitive_metrics = Application.get_env(:nature_whistle, :sensitive_metrics)
 
     on_exit(fn ->
