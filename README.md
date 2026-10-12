@@ -273,7 +273,8 @@ It emits these telemetry events:
 
 - `[:nature_whistle, :vm, :mailbox, :saturated]` immediately when a process enters the saturated state;
 - `[:nature_whistle, :vm, :mailbox, :stall]` when saturation remains for `duration_ms`;
-- `[:nature_whistle, :vm, :mailbox, :recovered]` when the queue drains below `disable_threshold` or the process exits.
+- `[:nature_whistle, :vm, :mailbox, :recovered]` when the queue drains below `disable_threshold`;
+- `[:nature_whistle, :vm, :mailbox, :dead]` when the monitored process exits, including its exit reason in the event metadata.
 
 The event measurement contains `:message_queue_len`. Metadata contains the
 process `:pid`, `:monitor_state`, and a `:process_info` map. Stacktraces and
@@ -311,6 +312,13 @@ config :nature_whistle, :alerts, [
     event: [:nature_whistle, :vm, :mailbox, :recovered],
     condition: :event,
     alert_message: "Mailbox recovered",
+    notifiers: [:console]
+  },
+  %{
+    id: :mailbox_process_dead,
+    event: [:nature_whistle, :vm, :mailbox, :dead],
+    condition: :event,
+    alert_message: "Monitored mailbox process exited",
     notifiers: [:console]
   }
 ]
