@@ -4,7 +4,7 @@ defmodule NatureWhistle do
 
   It provides helpers for looking up, registering, and unregistering alert
   definitions. The built-in alert templates are provided by the BEAM pack and
-  loaded by `NatureWhistle.Application` when no custom `:alerts` setting is
+  loaded by `NatureWhistle.Setup` when no custom `:alerts` setting is
   present.
 
   The runtime is started by the `:nature_whistle` OTP application. Consumers
@@ -20,6 +20,22 @@ defmodule NatureWhistle do
   - optional `formatter`, `rate_limit`, `sliding_window`, and `resolution_ms`
     settings change how an alert behaves at runtime
   - delivery targets are selected by profile names listed in `notifiers`
+
+  Optional mailbox saturation monitoring is configured with
+  `:mailbox_monitor` and emits lifecycle events under
+  `[:nature_whistle, :vm, :mailbox, ...]`.
+
+  Notification security settings are configured under `:nature_whistle`:
+
+  - `:sensitive_metadata_keys` adds metadata keys to redact, in addition to
+    built-in sensitive-name matching.
+  - `:sensitive_metrics` lists Telemetry event names whose measurement values
+    should be replaced with `"[REDACTED]"` before notification formatting.
+
+  Both settings are validated during startup. Redaction sanitizes formatter
+  inputs; it does not rewrite developer-authored formatter output or alert
+  templates. Built-in HTTP notifiers require HTTPS unless the trusted developer
+  explicitly opts into `allow_insecure_http: true` for a notifier profile.
 
   The module also returns the built-in sample alerts used when no custom alerts
   are configured. These are convenient examples for documentation and testing,
@@ -99,7 +115,7 @@ defmodule NatureWhistle do
   alerts.
   """
   def register_alert(alert) do
-    NatureWhistle.Application.register_alert(alert)
+    NatureWhistle.Setup.register_alert(alert)
   end
 
   @doc """
@@ -118,7 +134,7 @@ defmodule NatureWhistle do
     if :ets.whereis(:nature_whistle_alerts) == :undefined do
       {:error, :not_started}
     else
-      NatureWhistle.Application.unregister_alert(alert_id)
+      NatureWhistle.Setup.unregister_alert(alert_id)
     end
   end
 end
