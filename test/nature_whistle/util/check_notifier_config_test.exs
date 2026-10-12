@@ -32,6 +32,7 @@ defmodule NatureWhistle.Util.CheckNotifierConfigTest do
 
   test "rejects an unsupported notifier service" do
     secret = "webhook-secret-token-123"
+
     Application.put_env(:nature_whistle, :notifiers_config, [
       %{
         name: :ops,

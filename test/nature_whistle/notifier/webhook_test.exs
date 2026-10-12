@@ -48,7 +48,9 @@ defmodule NatureWhistle.Notifier.WebhookTest do
              )
   end
 
-  test "deliver/3 does not expose a webhook response body when the endpoint fails", %{bypass: bypass} do
+  test "deliver/3 does not expose a webhook response body when the endpoint fails", %{
+    bypass: bypass
+  } do
     secret_response_body = "provider echoed secret-token-123"
 
     Bypass.expect_once(bypass, fn conn ->
