@@ -236,6 +236,69 @@ config :nature_whistle,
   ]
 ```
 
+## Mailbox Saturation Monitoring
+
+Mailbox monitoring is opt-in. Enable it explicitly when you want NatureWhistle
+to watch the BEAM-wide process message queues:
+
+```elixir
+config :nature_whistle, :mailbox_monitor,
+  enabled: true,
+  mode: :own,
+  threshold: 1_000,
+  disable_threshold: 500,
+  duration_ms: 90_000,
+  enrich: [:current_function, :status, :message_queue_len, :total_heap_size]
+```
+
+The monitor uses the OTP 27+ `:long_message_queue` system monitor facility.
+It emits these telemetry events:
+
+- `[:nature_whistle, :vm, :mailbox, :saturated]` immediately when a process enters the saturated state;
+- `[:nature_whistle, :vm, :mailbox, :stall]` when saturation remains for `duration_ms`;
+- `[:nature_whistle, :vm, :mailbox, :recovered]` when the queue drains below `disable_threshold` or the process exits.
+
+The event measurement contains `:message_queue_len`. Metadata contains the
+process `:pid`, `:monitor_state`, and a `:process_info` map. Stacktraces and
+process dictionaries are excluded by default because they are expensive or may
+contain sensitive application data. They can be explicitly requested with
+`:enrich`, but should be enabled only with care.
+
+`mode: :own` claims the VM system monitor only when no other owner exists. It
+does not replace an existing system monitor. `mode: :disabled` leaves the
+feature off. On OTP/ERTS versions without long-message-queue support, the
+monitor is skipped gracefully.
+
+Configure normal NatureWhistle event alerts for the emitted events when you
+want notifications. For example, an immediate warning and a sustained stall
+alert can be configured as ordinary `condition: :event` alerts:
+
+```elixir
+config :nature_whistle, :alerts, [
+  %{
+    id: :mailbox_saturated,
+    event: [:nature_whistle, :vm, :mailbox, :saturated],
+    condition: :event,
+    alert_message: "Mailbox saturation detected",
+    notifiers: [:console]
+  },
+  %{
+    id: :mailbox_stall,
+    event: [:nature_whistle, :vm, :mailbox, :stall],
+    condition: :event,
+    alert_message: "Mailbox stall detected",
+    notifiers: [:console]
+  },
+  %{
+    id: :mailbox_recovered,
+    event: [:nature_whistle, :vm, :mailbox, :recovered],
+    condition: :event,
+    alert_message: "Mailbox recovered",
+    notifiers: [:console]
+  }
+]
+```
+
 ## Runtime Alert Registration
 
 Alerts do not have to be known when the application starts. You can register and unregister alerts while the BEAM is running.
@@ -347,10 +410,69 @@ alert remains breached until all active keys recover.
 
 `notifiers_config` defines the actual delivery endpoints, and each alert chooses from those profiles by name.
 
+### Security considerations
+
+Telemetry metadata is arbitrary application data and may contain passwords,
+tokens, cookies, authorization headers, or other sensitive values. Before a
+notification is formatted or dispatched, NatureWhistle redacts known sensitive
+metadata keys and any additional keys configured through
+`:sensitive_metadata_keys`. The configured keys are matched after normalizing
+case and punctuation, so atom and string spellings such as `:access_token` and
+`"access-token"` match equivalently.
+
+By default, key names containing fragments such as `password`, `secret`,
+`token`, `authorization`, `cookie`, `api_key`, `private_key`, or `credential`
+are treated as sensitive. Add application-specific keys explicitly:
+
+```elixir
+config :nature_whistle,
+  sensitive_metadata_keys: [:customer_email, :account_id, "payment-reference"],
+  sensitive_metrics: [
+    [:my_app, :customer, :lookup],
+    [:my_app, :billing, :balance]
+  ]
+```
+
+`:sensitive_metadata_keys` must be a list of non-empty atoms or strings.
+`:sensitive_metrics` must be a list of non-empty Telemetry event names, each
+represented as a list of atoms. NatureWhistle validates both settings during
+startup. Measurements for configured sensitive events are replaced with
+`"[REDACTED]"` before the value formatter and notification pipeline receive
+them. The event name must match exactly.
+
+Redaction is a safety net, not a substitute for choosing safe notification
+content. Custom formatters receive sanitized inputs, but their output is treated
+as developer-authored content and is not rewritten afterward. Avoid deliberately
+inserting secrets into alert templates or custom formatter output. Custom
+notifiers should also treat all inputs as sensitive.
+
+The console notifier does not log metadata by default. Diagnostic metadata
+logging must be explicitly enabled with `include_metadata: true`; the metadata
+is redacted before it is logged. Prefer selecting safe fields rather than
+emitting an entire metadata map.
+
+All built-in HTTP notifiers require HTTPS by default. Set
+`allow_insecure_http: true` only for local development or a deliberately trusted
+private test network; do not use it for production alert destinations. The
+generic webhook notifier does not include raw HTTP response bodies or transport
+errors in its retry error reason. Webhook URLs and custom payloads remain trusted
+developer configuration; this release does not implement comprehensive SSRF
+protection or restrict destinations based on their resolved IP addresses.
+
 ### Console
 
 ```elixir
 %{name: :console, service: :console, config: %{}}
+```
+
+For explicitly enabled, redacted diagnostic metadata:
+
+```elixir
+%{
+  name: :console_diagnostics,
+  service: :console,
+  config: %{include_metadata: true}
+}
 ```
 
 ### Slack
@@ -395,7 +517,9 @@ The main runtime API is intentionally small:
 - `NatureWhistle.get_alert_config/1` looks up a normalized alert definition.
 - `NatureWhistle.register_alert/1` registers an ephemeral runtime alert.
 - `NatureWhistle.unregister_alert/1` removes a runtime alert and its associated state.
-- `NatureWhistle.Application` owns application startup, configuration loading, and runtime alert registration.
+- `NatureWhistle.Setup` owns ETS initialization, alert configuration loading, and telemetry-handler synchronization.
+- `NatureWhistle.Setup` owns ETS initialization, alert configuration loading, runtime alert registration, and telemetry-handler synchronization.
+- `NatureWhistle.Application` owns OTP startup and supervision. Its runtime API delegates remain for backward compatibility.
 - `NatureWhistle.EventHandler.handle_event/4` is the telemetry callback used by configured events.
 - `NatureWhistle.EventGuard` exposes the rate-limit and sliding-window gates used by the alert pipeline.
 - `NatureWhistle.FailureTracker` exposes failure aggregation for repeated-failure alerts.
@@ -403,6 +527,7 @@ The main runtime API is intentionally small:
 - `NatureWhistle.Notification.send_notification/4` formats and asynchronously dispatches notifications.
 - `NatureWhistle.Packs.Beam` exposes BEAM metric collection, alert generation, and metric derivation.
 - `NatureWhistle.Packs.Beam.Collector` runs periodic BEAM metric collection.
+- `NatureWhistle.MailboxMonitor` owns optional BEAM-wide mailbox saturation monitoring.
 - `NatureWhistle.Packs.Ecto.alerts/1` and `NatureWhistle.Packs.Oban.alerts/1` generate integration-specific alert definitions.
 - `NatureWhistle.Notifier.*` modules implement the built-in delivery backends, while `NatureWhistle.Notifier.Behaviour` defines the notifier contract.
 
@@ -427,18 +552,26 @@ mix hex.publish
 
 ## Built-in Behavior
 
-- `NatureWhistle.Application`
+- `NatureWhistle.Setup`
   - creates the ETS tables used for alerts, alert state, rate limiting, and correlation state
   - loads alert config and pack-generated alerts into ETS
   - attaches telemetry handlers for configured and runtime alert events
+  - registers and removes runtime alerts
+  - synchronizes the BEAM collector with active runtime alerts
+- `NatureWhistle.Application`
+  - validates startup configuration through `NatureWhistle.Setup`
   - starts `NatureWhistle.TaskSupervisor`
   - starts `NatureWhistle.FailureTracker`
-  - starts `NatureWhistle.Packs.Beam.Collector`
+  - starts `NatureWhistle.Packs.Beam.Collector` when required
   - starts `NatureWhistle.BackgroundCleaner`
 - `NatureWhistle.Packs.Beam.Collector`
   - periodically samples the configured BEAM runtime metrics
   - emits the corresponding `[:vm, ...]` telemetry events consumed by the normal alert pipeline
   - collects only the metrics required by the active BEAM alerts
+- `NatureWhistle.MailboxMonitor`
+  - claims the optional VM system monitor without replacing an existing owner
+  - emits saturated, sustained stall, and recovered telemetry lifecycle events
+  - enriches events with safe process-state fields by default
 - `NatureWhistle.EventHandler`
   - extracts the configured measurement
   - evaluates metric and event conditions
