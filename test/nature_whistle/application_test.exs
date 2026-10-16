@@ -33,12 +33,50 @@ defmodule NatureWhistle.ApplicationTest do
       |> Enum.filter(&match?([:vm | _], &1.event))
       |> NatureWhistle.Packs.Beam.metrics()
 
-    if Process.whereis(NatureWhistle.Packs.Beam.Collector) do
-      :ok = NatureWhistle.Packs.Beam.Collector.configure(metrics)
-    end
+    reconcile_beam_collector(metrics)
 
     if original_alerts == nil do
       Application.delete_env(:nature_whistle, :alerts)
+    end
+  end
+
+  # Tests in this suite share the host-supervised NatureWhistle runtime. A test
+  # can temporarily remove all BEAM alerts, which also removes the collector.
+  # Restoring the alert configuration must restore the process as well as ETS.
+  defp reconcile_beam_collector(metrics) do
+    collector = NatureWhistle.Packs.Beam.Collector
+    supervisor = NatureWhistle.Supervisor
+
+    case {metrics, Process.whereis(collector)} do
+      {[], nil} ->
+        :ok
+
+      {[], _pid} ->
+        :ok = Supervisor.terminate_child(supervisor, collector)
+        :ok = Supervisor.delete_child(supervisor, collector)
+
+      {required_metrics, nil} ->
+        opts = [
+          interval_ms: Application.get_env(:nature_whistle, :beam_metric_interval_ms, 5_000),
+          metrics: required_metrics
+        ]
+
+        case Supervisor.start_child(supervisor, {collector, opts}) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+          {:error, :already_present} ->
+            case Supervisor.restart_child(supervisor, collector) do
+              {:ok, _pid} -> :ok
+              {:error, {:already_started, _pid}} -> :ok
+              {:error, reason} -> raise "failed to restart BEAM collector in test cleanup: #{inspect(reason)}"
+            end
+
+          {:error, reason} ->
+            raise "failed to restore BEAM collector in test cleanup: #{inspect(reason)}"
+        end
+
+      {_required_metrics, _pid} ->
+        :ok = collector.configure(metrics)
     end
   end
 
