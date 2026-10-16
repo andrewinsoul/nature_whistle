@@ -23,7 +23,6 @@ defmodule NatureWhistle.Application do
   existing before the first telemetry event is handled.
   """
 
-
   defp create_ets_tables do
     if :ets.whereis(:nature_whistle_alerts) == :undefined do
       :ets.new(:nature_whistle_alerts, [
@@ -494,7 +493,9 @@ defmodule NatureWhistle.Application do
     attach_handlers()
 
     sweep_interval = Application.get_env(:nature_whistle, :background_sweep_interval_ms, 10_000)
-    beam_metrics_interval_ms = Application.get_env(:nature_whistle, :beam_metric_interval_ms, 5_000)
+
+    beam_metrics_interval_ms =
+      Application.get_env(:nature_whistle, :beam_metric_interval_ms, 5_000)
 
     cleaner_opts =
       if sweep_interval && is_integer(sweep_interval),
@@ -524,5 +525,4 @@ defmodule NatureWhistle.Application do
   def start(_type \\ :normal, _args \\ []) do
     NatureWhistle.Supervisor.start_link([])
   end
-
 end
