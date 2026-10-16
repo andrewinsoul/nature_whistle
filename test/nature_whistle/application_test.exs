@@ -63,13 +63,22 @@ defmodule NatureWhistle.ApplicationTest do
         ]
 
         case Supervisor.start_child(supervisor, {collector, opts}) do
-          {:ok, _pid} -> :ok
-          {:error, {:already_started, _pid}} -> :ok
+          {:ok, _pid} ->
+            :ok
+
+          {:error, {:already_started, _pid}} ->
+            :ok
+
           {:error, :already_present} ->
             case Supervisor.restart_child(supervisor, collector) do
-              {:ok, _pid} -> :ok
-              {:error, {:already_started, _pid}} -> :ok
-              {:error, reason} -> raise "failed to restart BEAM collector in test cleanup: #{inspect(reason)}"
+              {:ok, _pid} ->
+                :ok
+
+              {:error, {:already_started, _pid}} ->
+                :ok
+
+              {:error, reason} ->
+                raise "failed to restart BEAM collector in test cleanup: #{inspect(reason)}"
             end
 
           {:error, reason} ->
