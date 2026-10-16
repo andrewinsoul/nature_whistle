@@ -42,6 +42,15 @@ defmodule NatureWhistle.ApplicationTest do
     end
   end
 
+  test "NatureWhistle.Supervisor exposes a permanent host-supervisable child spec" do
+    spec = NatureWhistle.Supervisor.child_spec([])
+
+    assert spec.id == NatureWhistle.Supervisor
+    assert spec.start == {NatureWhistle.Supervisor, :start_link, [[]]}
+    assert spec.restart == :permanent
+    assert spec.type == :supervisor
+  end
+
   test "creates core ETS tables upon start" do
     assert :ets.info(@alerts_table) != :undefined
     assert :ets.info(@state_table) != :undefined
@@ -107,7 +116,7 @@ defmodule NatureWhistle.ApplicationTest do
     Application.put_env(:nature_whistle, :retry, base_delay_ms: 5000, max_delay_ms: 1000)
 
     assert_raise RuntimeError, ~r/NatureWhistle Configuration Error/, fn ->
-      NatureWhistle.Application.start(:normal, [])
+      NatureWhistle.Application.child_specs()
     end
   end
 

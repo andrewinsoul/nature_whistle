@@ -152,6 +152,12 @@ Aggregate options are a keyword list. The required `:key` function receives tele
 
 `NatureWhistle.FailureTracker` determines when repeated failures become significant. Once the aggregate threshold is reached, the count flows through the same normal alert state, guard, and notification machinery used by the other alert primitives. When the aggregation window expires, the tracker reports recovery and NatureWhistle clears the breached state and sends the configured calm notification. If an alert has multiple active failure keys, it is resolved only after all active keys have recovered.
 
+## Core Requirement: The Host Owns NatureWhistle's Lifecycle
+
+**NatureWhistle's top-level runtime must be a child of the host application's supervisor.** This is a core architectural requirement, not an optional integration detail. The host application must own the restart policy for the complete NatureWhistle runtime, so a failure of `NatureWhistle.Supervisor` can be handled by the host supervisor.
+
+Start the runtime with `{NatureWhistle.Supervisor, []}` in the host's supervision tree. Do not add `NatureWhistle.Application` as a child, and do not independently start a second NatureWhistle runtime. NatureWhistle's internal supervisor remains responsible for restarting individual workers; the host supervisor owns recovery when the top-level NatureWhistle supervisor exits.
+
 ## 🚀 Installation & Setup
 
 Add `nature_whistle` to your `mix.exs` dependencies:
@@ -159,18 +165,29 @@ Add `nature_whistle` to your `mix.exs` dependencies:
 ```elixir
 defp deps do
   [
-    {:nature_whistle, "~> 0.4.1"}
+    {:nature_whistle, "~> 0.4.3"}
   ]
 end
 ```
 
-`NatureWhistle.Application` is started automatically as the dependency's OTP
-application. You do not need to add it as a second child in your supervision
-tree. Configure the application and start your normal application as usual.
+As a core requirement, add NatureWhistle's runtime supervisor to your host
+application's supervision tree. This makes the host supervisor the owner of
+NatureWhistle's top-level lifecycle and restart policy. Do not add
+`NatureWhistle.Application` as a child or start a second runtime independently.
 
-If your application deliberately uses `runtime: false` or starts dependencies
-manually, start `:nature_whistle` explicitly before registering alerts or
-emitting telemetry events.
+```elixir
+children = [
+  MyApp.Repo,
+  {NatureWhistle.Supervisor, []},
+  MyAppWeb.Endpoint
+]
+
+Supervisor.start_link(children, strategy: :one_for_one, name: MyApp.Supervisor)
+```
+
+The host supervisor restarts the complete NatureWhistle runtime if its top-level
+supervisor exits. NatureWhistle's own `:one_for_one` strategy continues to
+restart individual workers independently.
 
 ## Configuration
 
@@ -395,7 +412,7 @@ The main runtime API is intentionally small:
 - `NatureWhistle.get_alert_config/1` looks up a normalized alert definition.
 - `NatureWhistle.register_alert/1` registers an ephemeral runtime alert.
 - `NatureWhistle.unregister_alert/1` removes a runtime alert and its associated state.
-- `NatureWhistle.Application` owns application startup, configuration loading, and runtime alert registration.
+- `NatureWhistle.Application` initializes configuration and runtime alert registration; `NatureWhistle.Supervisor` owns the runtime process tree.
 - `NatureWhistle.EventHandler.handle_event/4` is the telemetry callback used by configured events.
 - `NatureWhistle.EventGuard` exposes the rate-limit and sliding-window gates used by the alert pipeline.
 - `NatureWhistle.FailureTracker` exposes failure aggregation for repeated-failure alerts.
@@ -428,6 +445,7 @@ mix hex.publish
 ## Built-in Behavior
 
 - `NatureWhistle.Application`
+- `NatureWhistle.Supervisor`
   - creates the ETS tables used for alerts, alert state, rate limiting, and correlation state
   - loads alert config and pack-generated alerts into ETS
   - attaches telemetry handlers for configured and runtime alert events

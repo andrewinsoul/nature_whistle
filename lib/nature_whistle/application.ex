@@ -23,7 +23,6 @@ defmodule NatureWhistle.Application do
   existing before the first telemetry event is handled.
   """
 
-  use Application
 
   defp create_ets_tables do
     if :ets.whereis(:nature_whistle_alerts) == :undefined do
@@ -482,31 +481,20 @@ defmodule NatureWhistle.Application do
   end
 
   @doc """
-  Creates the application runtime.
+  Initializes NatureWhistle's runtime and returns its child specifications.
 
-  The startup sequence is:
-
-  1. create the ETS tables if they do not already exist
-  2. load alert definitions from application config into ETS
-  3. attach one telemetry handler per configured event
-  4. validate retry settings
-  5. start the supervision tree, including the task supervisor, failure tracker,
-     background cleaner, and the BEAM collector when metrics are required
-  6. synchronize the BEAM collector with runtime alert registration and removal
-
-  The function returns the result of the internal supervisor start-up.
+  This is called from `NatureWhistle.Supervisor.init/1`, so ETS tables are
+  owned by the host-supervised NatureWhistle supervisor process and are not
+  tied to the OTP application callback process.
   """
-  @impl true
-  def start(_type, _args) do
+  def child_specs do
     schedulers_online = System.schedulers_online()
     create_ets_tables()
     beam_metrics = load_config_into_ets(schedulers_online)
     attach_handlers()
 
     sweep_interval = Application.get_env(:nature_whistle, :background_sweep_interval_ms, 10_000)
-
-    beam_metrics_interval_ms =
-      Application.get_env(:nature_whistle, :beam_metric_interval_ms, 5_000)
+    beam_metrics_interval_ms = Application.get_env(:nature_whistle, :beam_metric_interval_ms, 5_000)
 
     cleaner_opts =
       if sweep_interval && is_integer(sweep_interval),
@@ -525,16 +513,16 @@ defmodule NatureWhistle.Application do
         ]
       end
 
-    children =
-      [
-        {Task.Supervisor, name: NatureWhistle.TaskSupervisor},
-        {NatureWhistle.FailureTracker,
-         [recovery_handler: &NatureWhistle.EventHandler.handle_aggregate_recovery/1]}
-      ] ++ beam_collector_children ++ [{NatureWhistle.BackgroundCleaner, cleaner_opts}]
-
-    {:ok, pid} =
-      Supervisor.start_link(children, strategy: :one_for_one, name: NatureWhistle.Supervisor)
-
-    {:ok, pid}
+    [
+      {Task.Supervisor, name: NatureWhistle.TaskSupervisor},
+      {NatureWhistle.FailureTracker,
+       [recovery_handler: &NatureWhistle.EventHandler.handle_aggregate_recovery/1]}
+    ] ++ beam_collector_children ++ [{NatureWhistle.BackgroundCleaner, cleaner_opts}]
   end
+
+  @doc false
+  def start(_type \\ :normal, _args \\ []) do
+    NatureWhistle.Supervisor.start_link([])
+  end
+
 end

@@ -7,20 +7,20 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - Passing `nil` or omitting `rate_limit` and `sliding_window` now disables the
-  corresponding event-handling functionality and avoids its ETS bookkeeping.
+corresponding event-handling functionality and avoids its ETS bookkeeping.
 - Clarified that event alerts require an explicit correlated recovery event for
-  calm notifications.
+calm notifications.
 - Documented the Oban pack as a consumer of Oban's real job telemetry events;
-  the pack does not depend on or start Oban.
+the pack does not depend on or start Oban.
 
 ### Documentation
 
 - Configured ExDoc to publish the README and changelog alongside the module
-  reference on HexDocs.
+reference on HexDocs.
 - Updated alert lifecycle, recovery, guard, runtime-registration, and Oban
-  integration documentation to match the current implementation.
+integration documentation to match the current implementation.
 
-## [0.4.2] - 2026-09-09
+## [0.4.3] - 2026-09-09
 
 ### Added
 

@@ -4,7 +4,7 @@ defmodule NatureWhistle.MixProject do
   def project do
     [
       app: :nature_whistle,
-      version: "0.4.2",
+      version: "0.4.3",
       elixir: "~> 1.11",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -21,8 +21,7 @@ defmodule NatureWhistle.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger],
-      mod: {NatureWhistle.Application, []}
+      extra_applications: [:logger]
     ]
   end
 
