@@ -26,6 +26,7 @@ defmodule NatureWhistle.ApplicationTest do
 
   defp restore_alert_runtime(original_alerts) do
     NatureWhistle.Application.load_config_into_ets(System.schedulers_online())
+    NatureWhistle.Application.refresh_beam_collector()
 
     metrics =
       :ets.tab2list(@alerts_table)

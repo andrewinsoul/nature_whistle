@@ -428,6 +428,11 @@ defmodule NatureWhistle.Application do
     do:
       "✅ NatureWhistle resolution: %{value} is back below threshold (#{threshold}) for event #{inspect(event)}"
 
+  @doc false
+  def refresh_beam_collector do
+    sync_beam_collector()
+  end
+
   defp sync_beam_collector do
     beam_metrics =
       :ets.tab2list(:nature_whistle_alerts)
