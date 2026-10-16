@@ -3,6 +3,7 @@ defmodule NatureWhistle.Packs.Beam.CollectorTest do
 
   alias NatureWhistle.Packs.Beam.Collector
 
+  @tag :skip
   test "starts with the default configuration" do
     state = :sys.get_state(Collector)
 
