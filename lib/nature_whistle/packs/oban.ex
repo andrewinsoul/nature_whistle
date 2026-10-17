@@ -22,6 +22,8 @@ defmodule NatureWhistle.Packs.Oban do
 
   @behaviour NatureWhistle.Pack
 
+  alias NatureWhistle.Packs.AlertConfig
+
   @job_events %{
     stop: [:oban, :job, :stop],
     exception: [:oban, :job, :exception]
@@ -68,7 +70,8 @@ defmodule NatureWhistle.Packs.Oban do
         config -> [build_failure_alert(config)]
       end
 
-    metric_alerts ++ aggregate_alerts
+    (metric_alerts ++ aggregate_alerts)
+    |> AlertConfig.apply_notifiers(opts)
   end
 
   @doc false

@@ -30,6 +30,19 @@ defmodule NatureWhistle.Packs.EctoTest do
            ]
   end
 
+  test "applies configured notifier profiles to every generated alert" do
+    alerts = Ecto.alerts(repo: Repo, notifiers: [:slack_primary])
+
+    assert length(alerts) == 5
+    assert Enum.all?(alerts, &(&1.notifiers == [:slack_primary]))
+  end
+
+  test "rejects an invalid notifiers option" do
+    assert_raise ArgumentError, ~r/Invalid :notifiers option/, fn ->
+      Ecto.alerts(repo: Repo, notifiers: :slack_primary)
+    end
+  end
+
   test "uses the repo telemetry prefix for each alert" do
     alerts = Ecto.alerts(repo: Repo)
 

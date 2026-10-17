@@ -3,6 +3,19 @@ defmodule NatureWhistle.Packs.ObanTest do
 
   alias NatureWhistle.Packs.Oban
 
+  test "overrides notifier profiles for every generated alert" do
+    alerts = Oban.alerts(notifiers: [:slack_primary])
+
+    assert length(alerts) == 3
+    assert Enum.all?(alerts, &(&1.notifiers == [:slack_primary]))
+  end
+
+  test "rejects an invalid notifiers option" do
+    assert_raise ArgumentError, ~r/Invalid :notifiers option/, fn ->
+      Oban.alerts(notifiers: :slack_primary)
+    end
+  end
+
   test "returns the default Oban alerts" do
     alerts = Oban.alerts([])
 

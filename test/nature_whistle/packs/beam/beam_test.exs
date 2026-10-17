@@ -18,6 +18,19 @@ defmodule NatureWhistle.Packs.BeamTest do
            ]
   end
 
+  test "overrides notifier profiles for every generated alert" do
+    alerts = Beam.alerts(notifiers: [:slack_primary])
+
+    assert length(alerts) == 8
+    assert Enum.all?(alerts, &(&1.notifiers == [:slack_primary]))
+  end
+
+  test "rejects an invalid notifiers option" do
+    assert_raise ArgumentError, ~r/Invalid :notifiers option/, fn ->
+      Beam.alerts(notifiers: :slack_primary)
+    end
+  end
+
   test "configures the high memory alert" do
     [alert] =
       Beam.alerts([])

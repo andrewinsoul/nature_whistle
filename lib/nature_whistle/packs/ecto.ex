@@ -1,5 +1,6 @@
 defmodule NatureWhistle.Packs.Ecto do
   @behaviour NatureWhistle.Pack
+  alias NatureWhistle.Packs.AlertConfig
 
   @alert_metrics [
     {:slow_query, :query, :total_time, 1_000},
@@ -21,6 +22,8 @@ defmodule NatureWhistle.Packs.Ecto do
 
   - `:thresholds` - keyword list keyed by alert name, with thresholds in
     milliseconds; use `false` to disable an alert
+  - `:notifiers` - list of notifier profile names to use for every generated
+    alert; when omitted, the global default notifier behavior is preserved
 
   The generated thresholds are converted from milliseconds to the native
   time unit used by Ecto telemetry measurements.
@@ -58,6 +61,7 @@ defmodule NatureWhistle.Packs.Ecto do
         end
       end
     )
+    |> AlertConfig.apply_notifiers(opts)
   end
 
   defp build_alert(

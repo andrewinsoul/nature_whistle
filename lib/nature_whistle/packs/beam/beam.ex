@@ -1,5 +1,6 @@
 defmodule NatureWhistle.Packs.Beam do
   @behaviour NatureWhistle.Pack
+  alias NatureWhistle.Packs.AlertConfig
 
   @metrics [
     :memory,
@@ -209,6 +210,7 @@ defmodule NatureWhistle.Packs.Beam do
     ]
     |> Enum.map(&configure_alert(&1, thresholds))
     |> Enum.reject(&is_nil/1)
+    |> AlertConfig.apply_notifiers(opts)
   end
 
   defp configure_alert(alert, thresholds) do
