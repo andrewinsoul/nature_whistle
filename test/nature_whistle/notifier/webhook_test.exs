@@ -41,19 +41,30 @@ defmodule NatureWhistle.Notifier.WebhookTest do
                "payload",
                %{},
                webhook_url: "http://localhost:#{bypass.port}",
+               allow_insecure_http: true,
                method: :put,
                headers: [{"x-api-key", "abc123"}, {"origin", "nature-whistle"}],
                payload: %{severity: "high"}
              )
   end
 
-  test "deliver/3 returns an error when the webhook endpoint fails", %{bypass: bypass} do
+  test "deliver/3 does not expose a webhook response body when the endpoint fails", %{
+    bypass: bypass
+  } do
+    secret_response_body = "provider echoed secret-token-123"
+
     Bypass.expect_once(bypass, fn conn ->
-      Plug.Conn.resp(conn, 500, "boom")
+      Plug.Conn.resp(conn, 500, secret_response_body)
     end)
 
-    assert {:error, :max_attempts_exceeded} =
-             Webhook.deliver("payload", %{}, webhook_url: "http://localhost:#{bypass.port}")
+    result =
+      Webhook.deliver("payload", %{},
+        webhook_url: "http://localhost:#{bypass.port}",
+        allow_insecure_http: true
+      )
+
+    assert result == {:error, :max_attempts_exceeded}
+    refute inspect(result) =~ secret_response_body
   end
 
   test "deliver/3 accepts map configuration and uses defaults", %{bypass: bypass} do
@@ -70,7 +81,7 @@ defmodule NatureWhistle.Notifier.WebhookTest do
              Webhook.deliver(
                "payload",
                %{},
-               %{webhook_url: "http://localhost:#{bypass.port}"}
+               %{webhook_url: "http://localhost:#{bypass.port}", allow_insecure_http: true}
              )
   end
 
@@ -80,12 +91,17 @@ defmodule NatureWhistle.Notifier.WebhookTest do
     end
   end
 
+  test "deliver/3 rejects insecure HTTP URLs by default", %{bypass: bypass} do
+    assert {:error, :insecure_webhook_url} =
+             Webhook.deliver("payload", %{}, webhook_url: "http://localhost:#{bypass.port}")
+  end
+
   test "deliver/3 handles transport errors" do
     assert {:error, :max_attempts_exceeded} =
              Webhook.deliver(
                "payload",
                %{},
-               %{webhook_url: "http://127.0.0.1:1"}
+               %{webhook_url: "http://127.0.0.1:1", allow_insecure_http: true}
              )
   end
 end
