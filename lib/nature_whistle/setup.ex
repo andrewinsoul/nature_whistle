@@ -26,11 +26,52 @@ defmodule NatureWhistle.Setup do
   @supported_notification_channels [:console, :webhook, :teams, :slack]
 
   @doc """
+  Builds the child specifications for the host-supervised NatureWhistle runtime.
+
+  Runtime state is initialized before children start. The host application owns
+  the lifecycle by adding `NatureWhistle.Supervisor` to its supervision tree.
+  """
+  def child_specs do
+    beam_metrics = init()
+    validate_retry_config!()
+
+    sweep_interval =
+      Application.get_env(:nature_whistle, :background_sweep_interval_ms, 10_000)
+
+    beam_metrics_interval_ms =
+      Application.get_env(:nature_whistle, :beam_metric_interval_ms, 5_000)
+
+    cleaner_opts =
+      if sweep_interval && is_integer(sweep_interval),
+        do: [sweep_interval_ms: sweep_interval],
+        else: []
+
+    beam_collector_children =
+      if beam_metrics == [] do
+        []
+      else
+        [
+          {NatureWhistle.Packs.Beam.Collector,
+           [interval_ms: beam_metrics_interval_ms, metrics: beam_metrics]}
+        ]
+      end
+
+    [
+      {Task.Supervisor, name: NatureWhistle.TaskSupervisor},
+      {NatureWhistle.FailureTracker,
+       [recovery_handler: &NatureWhistle.EventHandler.handle_aggregate_recovery/1]}
+    ] ++
+      beam_collector_children ++
+      mailbox_monitor_children() ++
+      [{NatureWhistle.BackgroundCleaner, cleaner_opts}]
+  end
+
+  @doc """
   Initializes NatureWhistle's ETS state, alert configuration, and telemetry
   handlers.
 
   Returns the BEAM metric identifiers required by the loaded alerts. The
-  application uses this result to decide whether to start the BEAM collector.
+  supervisor uses this result to decide whether to start the BEAM collector.
   """
   def init do
     Notifier.Security.validate_sensitive_metadata_keys!()

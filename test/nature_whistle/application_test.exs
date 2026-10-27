@@ -164,7 +164,7 @@ defmodule NatureWhistle.ApplicationTest do
     Application.put_env(:nature_whistle, :retry, base_delay_ms: 5000, max_delay_ms: 1000)
 
     assert_raise RuntimeError, ~r/NatureWhistle Configuration Error/, fn ->
-      NatureWhistle.Application.child_specs()
+      NatureWhistle.Setup.child_specs()
     end
   end
 

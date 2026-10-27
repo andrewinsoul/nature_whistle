@@ -542,7 +542,7 @@ The main runtime API is intentionally small:
 - `NatureWhistle.get_alert_config/1` looks up a normalized alert definition.
 - `NatureWhistle.register_alert/1` registers an ephemeral runtime alert.
 - `NatureWhistle.unregister_alert/1` removes a runtime alert and its associated state.
-- `NatureWhistle.Application` initializes configuration and runtime alert registration; `NatureWhistle.Supervisor` owns the runtime process tree.
+- `NatureWhistle.Setup` initializes configuration and manages runtime alert registration; `NatureWhistle.Supervisor` owns the runtime process tree.
 - `NatureWhistle.EventHandler.handle_event/4` is the telemetry callback used by configured events.
 - `NatureWhistle.EventGuard` exposes the rate-limit and sliding-window gates used by the alert pipeline.
 - `NatureWhistle.FailureTracker` exposes failure aggregation for repeated-failure alerts.
@@ -575,19 +575,19 @@ mix hex.publish
 
 ## Built-in Behavior
 
-- `NatureWhistle.Application`
-- `NatureWhistle.Supervisor`
+- `NatureWhistle.Setup`
   - creates the ETS tables used for alerts, alert state, rate limiting, and correlation state
   - loads alert config and pack-generated alerts into ETS
   - attaches telemetry handlers for configured and runtime alert events
   - registers and removes runtime alerts
   - synchronizes the BEAM collector with active runtime alerts
-- `NatureWhistle.Application`
-  - validates startup configuration through `NatureWhistle.Setup`
-  - starts `NatureWhistle.TaskSupervisor`
-  - starts `NatureWhistle.FailureTracker`
+  - assembles child specifications for the runtime supervisor
+- `NatureWhistle.Supervisor`
+  - supervises `NatureWhistle.TaskSupervisor` and `NatureWhistle.FailureTracker`
   - starts `NatureWhistle.Packs.Beam.Collector` when required
-  - starts `NatureWhistle.BackgroundCleaner`
+  - starts `NatureWhistle.MailboxMonitor` when explicitly enabled
+  - supervises `NatureWhistle.BackgroundCleaner`
+- `NatureWhistle.Application` remains a small compatibility facade for setup functions; host applications should supervise `NatureWhistle.Supervisor` directly.
 - `NatureWhistle.Packs.Beam.Collector`
   - periodically samples the configured BEAM runtime metrics
   - emits the corresponding `[:vm, ...]` telemetry events consumed by the normal alert pipeline
