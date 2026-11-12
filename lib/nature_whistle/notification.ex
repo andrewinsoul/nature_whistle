@@ -172,6 +172,9 @@ defmodule NatureWhistle.Notification do
 
     Enum.flat_map(alert_notifiers, fn notifier_name ->
       case Enum.find(notifiers_config, &(Map.get(&1, :name) == notifier_name)) do
+        nil ->
+          Logger.warning("Notifier config not found for #{inspect(notifier_name)}")
+          []
         notifier_config_map ->
           [notifier_config_map]
       end
