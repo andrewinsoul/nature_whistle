@@ -175,6 +175,7 @@ defmodule NatureWhistle.Notification do
         nil ->
           Logger.warning("Notifier config not found for #{inspect(notifier_name)}")
           []
+
         notifier_config_map ->
           [notifier_config_map]
       end
