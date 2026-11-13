@@ -4,21 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **BEAM Mailbox Monitor** for detecting processes with unusually large message queues.
+- Mailbox monitoring supports saturation detection, sustained-stall detection, process recovery, and process termination events.
+- Mailbox monitoring is opt-in and configurable.
+- Recursive redaction of sensitive telemetry metadata before notification delivery.
+- Configurable sensitive metadata keys for additional redaction rules.
+
 ### Changed
 
-- Passing `nil` or omitting `rate_limit` and `sliding_window` now disables the
-corresponding event-handling functionality and avoids its ETS bookkeeping.
-- Clarified that event alerts require an explicit correlated recovery event for
-calm notifications.
-- Documented the Oban pack as a consumer of Oban's real job telemetry events;
-the pack does not depend on or start Oban.
+- Webhook URLs now require HTTPS by default. HTTP endpoints can be explicitly enabled through `allow_insecure_http`.
+- Notification delivery now uses sanitized measurements and metadata to reduce the risk of exposing sensitive information.
+- Webhook transport errors return generic error information rather than exposing potentially sensitive underlying details.
+- Application setup responsibilities are handled by `NatureWhistle.Setup`, keeping `NatureWhistle.Application` as a compatibility facade.
+- Mailbox monitoring components are included in the supervision tree only when explicitly enabled.
+- Passing `nil` or omitting `rate_limit` and `sliding_window` now disables the corresponding event-handling functionality and avoids its ETS bookkeeping.
+- Clarified that event alerts require an explicit correlated recovery event for calm notifications.
+- Documented the Oban pack as a consumer of Oban's real job telemetry events; the pack does not depend on or start Oban.
 
 ### Documentation
 
-- Configured ExDoc to publish the README and changelog alongside the module
-reference on HexDocs.
-- Updated alert lifecycle, recovery, guard, runtime-registration, and Oban
-integration documentation to match the current implementation.
+- Configured ExDoc to publish the README and changelog alongside the module reference on HexDocs.
+- Updated alert lifecycle, recovery, guard, runtime-registration, and Oban integration documentation to match the current implementation.
+- Documented mailbox monitoring configuration and behaviour.
+- Updated security documentation to cover metadata redaction and webhook transport security.
 
 ## [0.4.3] - 2026-09-09
 
