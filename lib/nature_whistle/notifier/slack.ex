@@ -8,11 +8,17 @@ defmodule NatureWhistle.Notifier.Slack do
 
   Required config:
 
-  - `:webhook_url` - the Slack incoming webhook endpoint
+  - `:webhook_url` - the Slack incoming webhook endpoint; HTTPS is required by
+    default
+
+  Optional config:
+
+  - `:allow_insecure_http` - explicitly permits an `http://` URL for local or
+    trusted private testing
 
   All HTTP retry behavior is delegated to `NatureWhistle.Notifier.Retry`.
   """
-  alias NatureWhistle.Notifier.Retry
+  alias NatureWhistle.Notifier.{Retry, Security}
   @behaviour NatureWhistle.Notifier.Behaviour
 
   @impl true
@@ -33,17 +39,19 @@ defmodule NatureWhistle.Notifier.Slack do
     webhook_url = Map.fetch!(config, :webhook_url)
     payload = %{text: message}
 
-    Retry.with_retry(fn ->
-      case Req.post(webhook_url, json: payload) do
-        {:ok, %Req.Response{status: status}} when status in 200..299 ->
-          {:ok, :sent}
+    with :ok <- Security.validate_webhook_url(config) do
+      Retry.with_retry(fn ->
+        case Req.post(webhook_url, json: payload) do
+          {:ok, %Req.Response{status: status}} when status in 200..299 ->
+            {:ok, :sent}
 
-        {:ok, %Req.Response{status: status, body: body}} ->
-          {:error, "HTTP #{status}: #{body}"}
+          {:ok, %Req.Response{status: _status}} ->
+            {:error, :slack_request_failed}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end)
+          {:error, _reason} ->
+            {:error, :slack_request_failed}
+        end
+      end)
+    end
   end
 end

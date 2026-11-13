@@ -164,7 +164,7 @@ defmodule NatureWhistle.ApplicationTest do
     Application.put_env(:nature_whistle, :retry, base_delay_ms: 5000, max_delay_ms: 1000)
 
     assert_raise RuntimeError, ~r/NatureWhistle Configuration Error/, fn ->
-      NatureWhistle.Application.child_specs()
+      NatureWhistle.Setup.child_specs()
     end
   end
 
@@ -191,6 +191,84 @@ defmodule NatureWhistle.ApplicationTest do
     assert :ets.lookup(:nature_whistle_alerts, [:runtime, :alert, :stop]) == []
   end
 
+  test "register_alert/1 raises when notifier config is missing" do
+    Application.put_env(:nature_whistle, :notifiers_config, [
+      %{name: :console, service: :console, config: %{}}
+    ])
+
+    alert = %{
+      id: :invalid_notifier_alert,
+      event: [:runtime, :alert, :missing_notifier],
+      measurement_key: :duration,
+      threshold: 500,
+      notifiers: [:missing_channel]
+    }
+
+    assert_raise ArgumentError,
+                 "Notifier config not found for :missing_channel",
+                 fn ->
+                   NatureWhistle.register_alert(alert)
+                 end
+
+    assert NatureWhistle.get_alert_config(:invalid_notifier_alert) == nil
+
+    assert :ets.lookup(
+             :nature_whistle_alerts,
+             [:runtime, :alert, :missing_notifier]
+           ) == []
+  end
+
+  test "register_alert/1 raises when notifier service is unsupported" do
+    Application.put_env(:nature_whistle, :notifiers_config, [
+      %{name: :invalid_target, service: :invalid_target, config: %{}}
+    ])
+
+    alert = %{
+      id: :unsupported_service_alert,
+      event: [:runtime, :alert, :unsupported_service],
+      measurement_key: :duration,
+      threshold: 500,
+      notifiers: [:invalid_target]
+    }
+
+    assert_raise ArgumentError, fn ->
+      NatureWhistle.register_alert(alert)
+    end
+
+    assert NatureWhistle.get_alert_config(:unsupported_service_alert) == nil
+
+    assert :ets.lookup(
+             :nature_whistle_alerts,
+             [:runtime, :alert, :unsupported_service]
+           ) == []
+  end
+
+  test "register_alert/1 raises when notifier profile names are duplicated" do
+    Application.put_env(:nature_whistle, :notifiers_config, [
+      %{name: :alerts, service: :console, config: %{}},
+      %{name: :alerts, service: :webhook, config: %{webhook_url: "https://example.com"}}
+    ])
+
+    alert = %{
+      id: :duplicate_notifier_alert,
+      event: [:runtime, :alert, :duplicate_notifier],
+      measurement_key: :duration,
+      threshold: 500,
+      notifiers: [:alerts]
+    }
+
+    assert_raise ArgumentError, fn ->
+      NatureWhistle.register_alert(alert)
+    end
+
+    assert NatureWhistle.get_alert_config(:duplicate_notifier_alert) == nil
+
+    assert :ets.lookup(
+             :nature_whistle_alerts,
+             [:runtime, :alert, :duplicate_notifier]
+           ) == []
+  end
+
   test "register_alert/1 rejects duplicate alert ids" do
     alert = %{
       id: :runtime_duplicate,
@@ -213,7 +291,10 @@ defmodule NatureWhistle.ApplicationTest do
       %{
         name: :runtime_slack,
         service: :slack,
-        config: %{webhook_url: "http://localhost:#{bypass.port}"}
+        config: %{
+          webhook_url: "http://localhost:#{bypass.port}",
+          allow_insecure_http: true
+        }
       }
     ])
 

@@ -18,7 +18,8 @@ defmodule NatureWhistle.Notifier.Behaviour do
   Implementations receive:
 
   - `message` - the final human-readable message with placeholders replaced
-  - `metadata` - the telemetry metadata associated with the event
+  - `metadata` - the sanitized telemetry metadata associated with the event. Every
+  sensitive data in the metadata is redacted, that is what the sanitization does
   - `config` - notifier-specific configuration, usually a map or keyword list
 
   Implementations should return:

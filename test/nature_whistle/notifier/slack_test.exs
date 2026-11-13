@@ -39,7 +39,7 @@ defmodule NatureWhistle.Notifier.SlackTest do
              Slack.deliver(
                "Slack Alert!",
                %{},
-               %{webhook_url: "http://localhost:#{bypass.port}"}
+               %{webhook_url: "http://localhost:#{bypass.port}", allow_insecure_http: true}
              )
   end
 
@@ -56,23 +56,29 @@ defmodule NatureWhistle.Notifier.SlackTest do
              Slack.deliver(
                "Keyword Alert!",
                %{},
-               webhook_url: "http://localhost:#{bypass.port}"
+               webhook_url: "http://localhost:#{bypass.port}",
+               allow_insecure_http: true
              )
   end
 
-  test "deliver/3 handles non-success HTTP responses", %{bypass: bypass} do
+  test "deliver/3 does not propagate a failure response body", %{bypass: bypass} do
+    secret_response_body = "provider echoed secret-token-123"
+
     Bypass.expect_once(bypass, fn conn ->
       conn
       |> Plug.Conn.put_resp_content_type("text/plain")
-      |> Plug.Conn.resp(500, "kasala bust")
+      |> Plug.Conn.resp(500, secret_response_body)
     end)
 
-    assert {:error, :max_attempts_exceeded} =
-             Slack.deliver(
-               "Slack Alert!",
-               %{},
-               %{webhook_url: "http://localhost:#{bypass.port}"}
-             )
+    result =
+      Slack.deliver(
+        "Slack Alert!",
+        %{},
+        %{webhook_url: "http://localhost:#{bypass.port}", allow_insecure_http: true}
+      )
+
+    assert result == {:error, :max_attempts_exceeded}
+    refute inspect(result) =~ secret_response_body
   end
 
   test "deliver/3 handles transport errors" do
@@ -80,7 +86,7 @@ defmodule NatureWhistle.Notifier.SlackTest do
              Slack.deliver(
                "Slack Alert!",
                %{},
-               %{webhook_url: "http://127.0.0.1:1"}
+               %{webhook_url: "http://127.0.0.1:1", allow_insecure_http: true}
              )
   end
 

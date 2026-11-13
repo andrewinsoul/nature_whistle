@@ -15,12 +15,20 @@ defmodule NatureWhistle.Notifier.Webhook do
   - `:method` - HTTP verb, defaults to `:post`
   - `:headers` - a list of request headers
   - `:payload` - a base JSON map merged with `%{text: message}`
+  - `:allow_insecure_http` - explicitly permits an `http://` URL; defaults to
+    `false` and should only be used for local or trusted private testing
 
   Retry behavior is shared with Slack and Teams through
-  `NatureWhistle.Notifier.Retry`.
+  `NatureWhistle.Notifier.Retry`. Failed responses and transport errors are
+  represented by a generic internal error reason; raw response bodies and
+  transport error details are not passed into the retry pipeline.
+
+  Webhook URLs and payload configuration are trusted developer input. URL
+  validation requires HTTPS by default, but this module does not implement
+  comprehensive SSRF protection or restrict destinations based on resolved IPs.
   """
 
-  alias NatureWhistle.Notifier.Retry
+  alias NatureWhistle.Notifier.{Retry, Security}
 
   @behaviour NatureWhistle.Notifier.Behaviour
 
@@ -45,17 +53,19 @@ defmodule NatureWhistle.Notifier.Webhook do
     headers = Map.get(config, :headers, [])
     method = Map.get(config, :method, :post)
 
-    Retry.with_retry(fn ->
-      case Req.request(method: method, url: webhook_url, headers: headers, json: payload) do
-        {:ok, %Req.Response{status: status}} when status in 200..299 ->
-          {:ok, :sent}
+    with :ok <- Security.validate_webhook_url(config) do
+      Retry.with_retry(fn ->
+        case Req.request(method: method, url: webhook_url, headers: headers, json: payload) do
+          {:ok, %Req.Response{status: status}} when status in 200..299 ->
+            {:ok, :sent}
 
-        {:ok, %Req.Response{status: status, body: body}} ->
-          {:error, "Webhook returned #{status}: #{body}"}
+          {:ok, %Req.Response{status: _status}} ->
+            {:error, :webhook_request_failed}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end)
+          {:error, _reason} ->
+            {:error, :webhook_request_failed}
+        end
+      end)
+    end
   end
 end

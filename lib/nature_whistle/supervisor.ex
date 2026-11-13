@@ -24,7 +24,7 @@ defmodule NatureWhistle.Supervisor do
 
   @impl true
   def init(_opts) do
-    children = NatureWhistle.Application.child_specs()
+    children = NatureWhistle.Setup.child_specs()
     Supervisor.init(children, strategy: :one_for_one)
   end
 end
