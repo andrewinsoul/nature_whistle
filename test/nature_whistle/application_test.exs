@@ -150,6 +150,7 @@ defmodule NatureWhistle.ApplicationTest do
   test "load_config_into_ets/1 applies global default notifiers to pack alerts" do
     Application.put_env(:nature_whistle, :alerts, [])
     Application.put_env(:nature_whistle, :default_notifiers, [:slack_primary])
+
     Application.put_env(:nature_whistle, :notifiers_config, [
       %{
         name: :slack_primary,
@@ -157,6 +158,7 @@ defmodule NatureWhistle.ApplicationTest do
         config: %{webhook_url: "https://example.com"}
       }
     ])
+
     Application.put_env(:nature_whistle, :packs, [
       {NatureWhistle.Packs.Beam, thresholds: [process_count: false]}
     ])
@@ -180,7 +182,9 @@ defmodule NatureWhistle.ApplicationTest do
         notifiers: [:console]
       }
     ])
+
     Application.put_env(:nature_whistle, :default_notifiers, [:slack_primary])
+
     Application.put_env(:nature_whistle, :notifiers_config, [
       %{name: :console, service: :console, config: %{}},
       %{
@@ -189,6 +193,7 @@ defmodule NatureWhistle.ApplicationTest do
         config: %{webhook_url: "https://example.com"}
       }
     ])
+
     Application.put_env(:nature_whistle, :packs, [])
 
     NatureWhistle.Application.load_config_into_ets(System.schedulers_online())
