@@ -391,12 +391,32 @@ defmodule NatureWhistle.Setup do
       resolution_ms: Map.get(alert, :resolution_ms, 60_000),
       sliding_window: Map.get(alert, :sliding_window),
       rate_limit: Map.get(alert, :rate_limit),
-      notifiers: Map.get(alert, :notifiers, List.wrap(Map.get(alert, :notifier, [:console]))),
+      notifiers: resolve_alert_notifiers!(alert),
       event_value: Map.get(alert, :event_value, 1),
       aggregate: aggregate_config(condition),
       correlation: Map.get(alert, :correlation),
       message_formatter: Map.get(alert, :message_formatter)
     }
+  end
+
+  defp resolve_alert_notifiers!(alert) do
+    cond do
+      Map.has_key?(alert, :notifiers) ->
+        Map.fetch!(alert, :notifiers)
+
+      Map.has_key?(alert, :notifier) ->
+        List.wrap(Map.fetch!(alert, :notifier))
+
+      true ->
+        case Application.get_env(:nature_whistle, :default_notifiers, [:console]) do
+          notifiers when is_list(notifiers) ->
+            notifiers
+
+          invalid ->
+            raise ArgumentError,
+                  "Invalid :default_notifiers configuration, expected a list of notifier names, got: #{inspect(invalid)}"
+        end
+    end
   end
 
   defp do_register_alert(alert) do

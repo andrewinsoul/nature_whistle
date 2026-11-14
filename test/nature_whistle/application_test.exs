@@ -10,11 +10,15 @@ defmodule NatureWhistle.ApplicationTest do
     original_alerts = Application.get_env(:nature_whistle, :alerts)
     original_retry = Application.get_env(:nature_whistle, :retry)
     original_notifiers_config = Application.get_env(:nature_whistle, :notifiers_config)
+    original_default_notifiers = Application.get_env(:nature_whistle, :default_notifiers)
+    original_packs = Application.get_env(:nature_whistle, :packs)
 
     on_exit(fn ->
       restore_env(:alerts, original_alerts)
       restore_env(:retry, original_retry)
       restore_env(:notifiers_config, original_notifiers_config)
+      restore_env(:default_notifiers, original_default_notifiers)
+      restore_env(:packs, original_packs)
       restore_alert_runtime(original_alerts)
     end)
 
@@ -141,6 +145,58 @@ defmodule NatureWhistle.ApplicationTest do
 
     assert [{^queue_event, [alert_map]}] = :ets.lookup(@alerts_table, queue_event)
     assert alert_map.threshold == 16
+  end
+
+  test "load_config_into_ets/1 applies global default notifiers to pack alerts" do
+    Application.put_env(:nature_whistle, :alerts, [])
+    Application.put_env(:nature_whistle, :default_notifiers, [:slack_primary])
+    Application.put_env(:nature_whistle, :notifiers_config, [
+      %{
+        name: :slack_primary,
+        service: :slack,
+        config: %{webhook_url: "https://example.com"}
+      }
+    ])
+    Application.put_env(:nature_whistle, :packs, [
+      {NatureWhistle.Packs.Beam, thresholds: [process_count: false]}
+    ])
+
+    NatureWhistle.Application.load_config_into_ets(System.schedulers_online())
+
+    alerts =
+      :ets.tab2list(@alerts_table)
+      |> Enum.flat_map(fn {_event, event_alerts} -> event_alerts end)
+
+    assert alerts != []
+    assert Enum.all?(alerts, &(&1.notifiers == [:slack_primary]))
+  end
+
+  test "alert-level notifiers take precedence over the global default" do
+    Application.put_env(:nature_whistle, :alerts, [
+      %{
+        id: :explicit_alert_notifier,
+        event: [:test, :explicit_notifier],
+        threshold: 1,
+        notifiers: [:console]
+      }
+    ])
+    Application.put_env(:nature_whistle, :default_notifiers, [:slack_primary])
+    Application.put_env(:nature_whistle, :notifiers_config, [
+      %{name: :console, service: :console, config: %{}},
+      %{
+        name: :slack_primary,
+        service: :slack,
+        config: %{webhook_url: "https://example.com"}
+      }
+    ])
+    Application.put_env(:nature_whistle, :packs, [])
+
+    NatureWhistle.Application.load_config_into_ets(System.schedulers_online())
+
+    assert [{[:test, :explicit_notifier], [alert]}] =
+             :ets.lookup(@alerts_table, [:test, :explicit_notifier])
+
+    assert alert.notifiers == [:console]
   end
 
   test "load_config_into_ets/1 promotes legacy notifier keys into notifiers lists" do

@@ -39,7 +39,8 @@ defmodule NatureWhistle.Packs.BeamTest do
     assert alert.event == [:vm, :memory, :total]
     assert alert.threshold == 1_073_741_824
     assert alert.debounce_ms == 300_000
-    assert alert.notifier == :console
+    refute Map.has_key?(alert, :notifier)
+    refute Map.has_key?(alert, :notifiers)
   end
 
   test "configures the high CPU run-queue alert" do
@@ -50,7 +51,8 @@ defmodule NatureWhistle.Packs.BeamTest do
     assert alert.event == [:vm, :total_run_queue_lengths, :total]
     assert alert.threshold == 4
     assert alert.debounce_ms == 60_000
-    assert alert.notifier == :console
+    refute Map.has_key?(alert, :notifier)
+    refute Map.has_key?(alert, :notifiers)
 
     assert alert.rate_limit == [
              window_ms: 60_000,

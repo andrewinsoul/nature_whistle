@@ -133,8 +133,7 @@ defmodule NatureWhistle.Packs.Beam do
         rate_limit: [
           window_ms: 60_000,
           max_events: 10
-        ],
-        notifier: :console
+        ]
       },
       %{
         id: :high_cpu,
@@ -150,8 +149,7 @@ defmodule NatureWhistle.Packs.Beam do
         sliding_window: [
           window_ms: 30_000,
           max_events: 3
-        ],
-        notifier: :console
+        ]
       },
       %{
         id: :high_process_memory,
@@ -159,8 +157,7 @@ defmodule NatureWhistle.Packs.Beam do
         threshold: 536_870_912,
         alert_message: "⚠️ High process memory usage: %{value} MB",
         calm_message: "✅ Process memory usage back to normal: %{value} MB",
-        debounce_ms: 300_000,
-        notifier: :console
+        debounce_ms: 300_000
       },
       %{
         id: :high_ets_memory,
@@ -168,8 +165,7 @@ defmodule NatureWhistle.Packs.Beam do
         threshold: 268_435_456,
         alert_message: "⚠️ High ETS memory usage: %{value} MB",
         calm_message: "✅ ETS memory usage back to normal: %{value} MB",
-        debounce_ms: 300_000,
-        notifier: :console
+        debounce_ms: 300_000
       },
       %{
         id: :high_binary_memory,
@@ -177,8 +173,7 @@ defmodule NatureWhistle.Packs.Beam do
         threshold: 268_435_456,
         alert_message: "⚠️ High binary memory usage: %{value} MB",
         calm_message: "✅ Binary memory usage back to normal: %{value} MB",
-        debounce_ms: 300_000,
-        notifier: :console
+        debounce_ms: 300_000
       },
       %{
         id: :high_process_count,
@@ -186,8 +181,7 @@ defmodule NatureWhistle.Packs.Beam do
         threshold: 50_000,
         alert_message: "⚠️ High process count: %{value}",
         calm_message: "✅ Process count back to normal: %{value}",
-        debounce_ms: 300_000,
-        notifier: :console
+        debounce_ms: 300_000
       },
       %{
         id: :high_atom_count,
@@ -195,8 +189,7 @@ defmodule NatureWhistle.Packs.Beam do
         threshold: 800_000,
         alert_message: "⚠️ High atom count: %{value}",
         calm_message: "✅ Atom count back to normal: %{value}",
-        debounce_ms: 300_000,
-        notifier: :console
+        debounce_ms: 300_000
       },
       %{
         id: :high_port_count,
@@ -204,8 +197,7 @@ defmodule NatureWhistle.Packs.Beam do
         threshold: 5_000,
         alert_message: "⚠️ High port count: %{value}",
         calm_message: "✅ Port count back to normal: %{value}",
-        debounce_ms: 300_000,
-        notifier: :console
+        debounce_ms: 300_000
       }
     ]
     |> Enum.map(&configure_alert(&1, thresholds))
